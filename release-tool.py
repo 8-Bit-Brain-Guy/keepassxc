@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2023 KeePassXC Team <team@keepassxc.org>
+# Copyright (C) 2025 KeePassXC Team <team@keepassxc.org>
 #
 # This program is free software: you can redistribute it and/or modify
 # it # under the terms of the GNU General Public License as published by
@@ -18,10 +18,12 @@
 
 import argparse
 import ctypes
+import signal
 from datetime import datetime
 import logging
 import os
 import platform
+import signal
 import shutil
 import subprocess
 import sys
@@ -44,12 +46,12 @@ TAG_NAME = None
 DOCKER_IMAGE = None
 DOCKER_CONTAINER_NAME = 'keepassxc-build-container'
 CMAKE_OPTIONS = []
-CPACK_GENERATORS = 'WIX;ZIP'
+CPACK_GENERATORS = 'ZIP'
 COMPILER = 'g++'
 MAKE_OPTIONS = f'-j{os.cpu_count()}'
 BUILD_PLUGINS = 'all'
 INSTALL_PREFIX = '/usr/local'
-MACOSX_DEPLOYMENT_TARGET = '10.15'
+MACOSX_DEPLOYMENT_TARGET = '12'
 TIMESTAMP_SERVER = 'http://timestamp.sectigo.com'
 
 
@@ -297,7 +299,6 @@ def main():
 
     parser = argparse.ArgumentParser(add_help=True)
     subparsers = parser.add_subparsers(title='commands')
-    subparsers.required = True
 
     check_parser = subparsers.add_parser('check', help=Check.__doc__)
     Check.setup_arg_parser(check_parser)
@@ -328,13 +329,24 @@ def main():
     i18n_parser.set_defaults(_cmd=I18N)
 
     args = parser.parse_args()
-    args._cmd().run(**{k: v for k, v in vars(args).items() if k is not '_cmd'})
+    if '_cmd' not in args:
+        parser.print_help()
+        return 1
+    return args._cmd().run(**{k: v for k, v in vars(args).items() if k != '_cmd'}) or 0
 
+
+def _sig_handler(_, __):
+    logger.warning('Process interrupted.')
+    sys.exit(3 | _cleanup())
+
+
+signal.signal(signal.SIGINT, _sig_handler)
+signal.signal(signal.SIGTERM, _sig_handler)
 
 if __name__ == '__main__':
     ret = 0
     try:
-        main()
+        ret = main()
     except Error as e:
         logger.error(e.msg, *e.args, extra=e.kwargs)
         ret = 1
