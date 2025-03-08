@@ -22,7 +22,9 @@ import signal
 from datetime import datetime
 import logging
 import os
+from pathlib import Path
 import platform
+import re
 import signal
 import shutil
 import subprocess
@@ -107,29 +109,51 @@ logger.addHandler(console_handler)
 ###########################################################################################
 
 
-def _run(cmd, *args, input=None, capture_output=True, cwd=None, timeout=None, check=True, **kwargs):
+def _get_bin_path(build_dir):
+    if not build_dir:
+        return None
+    build_dir = Path(build_dir)
+    path_sep = ';' if sys.platform == 'win32' else ':'
+    return path_sep.join(list(map(str, build_dir.rglob('vcpkg_installed/*/tools/**/bin'))) + [os.getenv('PATH')])
+
+
+def _run(cmd, *args, path=None, env=None, input=None, capture_output=True, cwd=None,
+         timeout=None, check=True, **kwargs):
     """
     Run a command and return its output.
     Raises an error if ``check`` is ``True`` and the process exited with a non-zero code.
     """
     if not cmd:
         raise ValueError('Empty command given.')
+
+    if not env:
+        env = {}
+    if path:
+        env['PATH'] = path
+
     try:
         return subprocess.run(
-            cmd, *args, input=input, capture_output=capture_output, cwd=cwd, timeout=timeout, check=check, **kwargs)
+            cmd, *args,
+            input=input,
+            capture_output=capture_output,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            check=check,
+            **kwargs)
     except FileNotFoundError:
         raise Error('Command not found: %s', cmd[0] if type(cmd) in [list, tuple] else cmd)
     except subprocess.CalledProcessError as e:
         if e.stderr:
-            raise SubprocessError('Command \'%s\' exited with non-zero code. Error: %s',
+            raise SubprocessError('Command "%s" exited with non-zero code. Error: %s',
                                   cmd[0], e.stderr, **e.__dict__)
         else:
-            raise SubprocessError('Command \'%s\' exited with non-zero code.', cmd[0], **e.__dict__)
+            raise SubprocessError('Command "%s" exited with non-zero code.', cmd[0], **e.__dict__)
 
 
-def _cmd_exists(cmd):
+def _cmd_exists(cmd, path=None):
     """Check if command exists."""
-    return shutil.which(cmd) is not None
+    return shutil.which(cmd, path=path) is not None
 
 
 def _git_get_branch():
@@ -143,9 +167,11 @@ def _git_checkout(branch):
         global ORIG_GIT_BRANCH
         if not ORIG_GIT_BRANCH:
             ORIG_GIT_BRANCH = _git_get_branch()
-        _run(['git', 'checkout', branch])
+
+        logger.info('Checking out branch "%s"...', branch)
+        # _run(['git', 'checkout', branch])
     except SubprocessError as e:
-        raise Error('Failed to check out branch \'%s\'. %s', branch, e.stderr.decode().capitalize())
+        raise Error('Failed to check out branch "%s". %s', branch, e.stderr.decode().capitalize())
 
 
 def _cleanup():
@@ -158,6 +184,12 @@ def _cleanup():
     except Exception as e:
         logger.critical('Exception occurred during cleanup:', exc_info=e)
         return 1
+
+
+def _split_version(version):
+    if type(version) is not str or not re.match(r'^\d+\.\d+\.\d+$', version):
+        raise Error('Invalid version number: %s', version)
+    return version.split('.')
 
 
 ###########################################################################################
@@ -181,20 +213,50 @@ class Check(Command):
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
-        pass
+        parser.add_argument('-v', '--version', help='Release version number or name')
+        parser.add_argument('-s', '--src-dir', help='Source directory', default='.')
+        parser.add_argument('-b', '--src-branch', help='Release source branch (default: inferred from --version)')
+        parser.add_argument('-t', '--check-tools', help='Check for necessary build tools', action='store_true')
 
-    def run(self, version):
-        print(version)
+    def run(self, version, src_dir, src_branch, check_tools):
+        if not version:
+            logger.warning('No version specified, performing only basic checks.')
+
+        if check_tools:
+            logger.info('Checking for build tools...')
+            self.check_transifex_cmd_exists()
+            self.check_xcode_setup()
+
+        logger.info('Performing basic checks...')
+        self.check_src_dir_exists(src_dir)
+        self.check_git_repository(src_dir)
+
+        if version:
+            logger.info('Performing version checks...')
+            major, minor, patch = _split_version(version)
+            src_branch = src_branch or f'release/{major}.{minor}.x'
+            self.check_working_tree_clean(src_dir)
+            self.check_release_does_not_exist(version, src_dir)
+            self.check_source_branch_exists(src_branch, src_dir)
+            _git_checkout(src_branch)
+            logger.info('Attempting to find "%s" version string in source files...', version)
+            self.check_version_in_cmake(version, src_dir)
+            self.check_changelog(version, src_dir)
+            self.check_app_stream_info(version, src_dir)
+
+        logger.info('All checks passed.')
 
     @staticmethod
     def check_src_dir_exists(src_dir):
-        if not os.path.isdir(src_dir):
-            raise Error(f'Source directory \'{src_dir}\' does not exist!')
+        if not src_dir:
+            raise Error('Empty source directory given.')
+        if not Path(src_dir).is_dir():
+            raise Error(f'Source directory "{src_dir}" does not exist!')
 
     @staticmethod
     def check_output_dir_does_not_exist(output_dir):
-        if os.path.exists(output_dir):
-            raise Error(f'Output directory \'{output_dir}\' already exists. Please choose a different folder.')
+        if Path(output_dir).is_dir():
+            raise Error(f'Output directory "{output_dir}" already exists. Please choose a different folder.')
 
     @staticmethod
     def check_git_repository(cwd=None):
@@ -214,7 +276,61 @@ class Check(Command):
     @staticmethod
     def check_source_branch_exists(branch, cwd=None):
         if _run(['git', 'rev-parse', branch], check=False, cwd=cwd).returncode != 0:
-            raise Error(f'Source branch \'{branch}\' does not exist!')
+            raise Error(f'Source branch "{branch}" does not exist!')
+
+    @staticmethod
+    def check_version_in_cmake(version, cwd=None):
+        cmakelists = Path('CMakeLists.txt')
+        if cwd:
+            cmakelists = Path(cwd) / cmakelists
+        if not cmakelists.is_file():
+            raise Error('File not found: %s', cmakelists)
+        cmakelists = cmakelists.read_text()
+        major, minor, patch = _split_version(version)
+        if f'{APP_NAME.upper()}_VERSION_MAJOR "{major}"' not in cmakelists:
+            raise Error(f'{APP_NAME.upper()}_VERSION_MAJOR not updated to" {major}" in {cmakelists}.')
+        if f'{APP_NAME.upper()}_VERSION_MINOR "{major}"' not in cmakelists:
+            raise Error(f'{APP_NAME.upper()}_VERSION_MINOR not updated to "{minor}" in {cmakelists}.')
+        if f'{APP_NAME.upper()}_VERSION_PATCH "{major}"' not in cmakelists:
+            raise Error(f'{APP_NAME.upper()}_VERSION_PATCH not updated to "{patch}" in {cmakelists}.')
+
+    @staticmethod
+    def check_changelog(version, cwd=None):
+        changelog = Path('CHANGELOG.md')
+        if cwd:
+            changelog = Path(cwd) / changelog
+        if not changelog.is_file():
+            raise Error('File not found: %s', changelog)
+        major, minor, patch = _split_version(version)
+        if not re.search(rf'^## {major}\.{minor}\.{patch} \([0-9]{4}-[0-9]{2}-[0-9]{2}\)',
+                         changelog.read_text()):
+            raise Error(f'{changelog} has not been updated to the "%s" release.', version)
+
+    @staticmethod
+    def check_app_stream_info(version, cwd=None):
+        appstream = Path('share/linux/org.keepassxc.KeePassXC.appdata.xml')
+        if cwd:
+            appstream = Path(cwd) / appstream
+        if not appstream.is_file():
+            raise Error('File not found: %s', appstream)
+        major, minor, patch = _split_version(version)
+        if not re.search(rf'^\s*<release version="{major}\.{minor}\.{patch}" date="[0-9]{4}-[0-9]{2}-[0-9]{2}">',
+                         appstream.read_text()):
+            raise Error(f'{appstream} has not been updated to the "%s" release.', version)
+
+    @staticmethod
+    def check_transifex_cmd_exists():
+        if not _cmd_exists('tx'):
+            raise Error('Transifex tool "tx" is not installed! Please install it using "pip install transifex-client".')
+
+    @staticmethod
+    def check_xcode_setup():
+        if sys.platform != 'darwin':
+            return
+        if not _cmd_exists('xcrun'):
+            raise Error('xcrun command not found! Please check that you have correctly installed Xcode.')
+        if not _cmd_exists('codesign'):
+            raise Error('codesign command not found! Please check that you have correctly installed Xcode.')
 
 
 class Merge(Command):
@@ -349,15 +465,15 @@ if __name__ == '__main__':
         ret = main()
     except Error as e:
         logger.error(e.msg, *e.args, extra=e.kwargs)
-        ret = 1
+        ret = e.kwargs.get('returncode', 1)
     except KeyboardInterrupt:
         logger.warning('Process interrupted.')
         ret = 3
-    except SystemExit as e:
-        ret = e.code
     except Exception as e:
         logger.critical('Unhandled exception:', exc_info=e)
         ret = 4
+    except SystemExit as e:
+        ret = e.code
     finally:
         ret |= _cleanup()
         sys.exit(ret)
