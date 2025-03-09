@@ -326,11 +326,6 @@ class Check(Command):
             raise Error(f'Source directory "{src_dir}" does not exist!')
 
     @staticmethod
-    def check_output_dir_does_not_exist(output_dir):
-        if Path(output_dir).is_dir():
-            raise Error(f'Output directory "{output_dir}" already exists. Please choose a different folder.')
-
-    @staticmethod
     def check_git_repository(cwd):
         if _run(['git', 'rev-parse', '--is-inside-work-tree'], check=False, cwd=cwd).returncode != 0:
             raise Error('Not a valid Git repository: %s', e.msg)
@@ -456,7 +451,8 @@ class Merge(Command):
                 tag_cmd.extend(['--sign', '--local-user', sign_key])
             _run(tag_cmd, cwd=src_dir)
 
-        log_msg = ('All done! Don\'t forget to push the tags:\n'
+        log_msg = ('All done! Don\'t forget to push the release branch and the new tags:\n'
+                   f'    {_TERM_BOLD}git push origin {release_branch}{_TERM_RES}\n'
                    f'    {_TERM_BOLD}git push origin tag {tag_name}{_TERM_RES}')
         if not no_latest:
             log_msg += f'\n    {_TERM_BOLD}git push origin tag latest --force{_TERM_RES}'
@@ -474,16 +470,20 @@ class Build(Command):
         parser.add_argument('-o', '--output-dir', default='release',
                             help='Build output directory (default: %(default)s.')
         parser.add_argument('-g', '--cmake-generator', help='Override default CMake generator.')
-        parser.add_argument('-i', '--install-prefix', help='Build install prefix.')
+        parser.add_argument('-i', '--install-prefix', default='/usr/local',
+                            help='Build install prefix (default: %(default)s).')
         parser.add_argument('-n', '--no-source-tarball', help='Don\'t create a source tarball.', action='store_true')
         parser.add_argument('--snapshot', help='Build snapshot from current HEAD.', action='store_true')
         parser.add_argument('--use-system-deps', help='Use system dependencies instead of vcpkg.', action='store_true')
+        parser.add_argument('-j', '--parallelism', default=os.cpu_count(), type=int,
+                            help='Build parallelism (default: %(default)s).')
+        parser.add_argument('-y', '--yes', help='Bypass confirmation prompts.', action='store_true')
 
         if sys.platform == 'darwin':
             parser.add_argument('--macos-target', default=MACOSX_DEPLOYMENT_TARGET, metavar='MACOSX_DEPLOYMENT_TARGET',
                                 help='macOS deployment target version (default: %(default)s).')
-            parser.add_argument('--platform-target', default=platform.uname().machine,
-                                help='Build target platform (default: %(default)s).')
+            parser.add_argument('-p', '--platform-target', default=platform.uname().machine,
+                                help='Build target platform (default: %(default)s).', choices=['x86_64', 'arm64'])
         elif sys.platform == 'linux':
             parser.add_argument('-d', '--docker-image', help='Run build in Docker image.')
             parser.add_argument('--container-name', default='keepassxc-build',
@@ -492,15 +492,29 @@ class Build(Command):
         parser.add_argument('-c', '--cmake-opts', nargs=argparse.REMAINDER,
                             help='Additional CMake options (no other arguments can be specified after this).')
 
-    def run(self, tag_name, no_source_tarball, cmake_generator, **kwargs):
-        version, src_dir, output_dir = kwargs['version'], kwargs['src_dir'], kwargs['output_dir']
+    def run(self, version, src_dir, output_dir, tag_name, snapshot, no_source_tarball,
+            cmake_generator, install_prefix, yes, **kwargs):
         Check.perform_basic_checks(src_dir)
-        Check.check_output_dir_does_not_exist(output_dir)
-        Path(output_dir).mkdir(parents=True)
+        src_dir = Path(src_dir).resolve()
+        output_dir = Path(output_dir)
+        if output_dir.is_dir():
+            logger.warning(f'Output directory "{output_dir}" already exists.')
+            if not yes and not _yes_no_prompt('Reuse existing output directory?'):
+                raise Error('Build aborted!')
+        else:
+            logger.info('Creating output directory...')
+            output_dir.mkdir(parents=True)
 
         tag_name = tag_name or version
-        cmake_opts = ['-DWITH_XC_ALL=ON']
-        if kwargs['snapshot']:
+        cmake_opts = [
+            '-DWITH_XC_ALL=ON',
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DCMAKE_INSTALL_PREFIX=' + install_prefix
+        ]
+        if not kwargs['use_system_deps']:
+            cmake_opts.append(f'-DCMAKE_TOOLCHAIN_FILE={self._get_vcpkg_toolchain_file()}')
+
+        if snapshot:
             logger.info('Building a snapshot from HEAD.')
             try:
                 Check.check_version_in_cmake(version, src_dir)
@@ -515,18 +529,18 @@ class Build(Command):
             cmake_opts.append('-DKEEPASSXC_BUILD_TYPE=Release')
 
         if cmake_generator:
-            cmake_opts.append(f'-G"{cmake_generator}"')
+            cmake_opts.extend(['-G', cmake_generator])
         kwargs['cmake_opts'] = cmake_opts + (kwargs['cmake_opts'] or [])
 
         if not no_source_tarball:
             self.build_source_tarball(version, tag_name, kwargs['src_dir'], kwargs['output_dir'])
 
         if sys.platform == 'win32':
-            return self.build_windows(**kwargs)
+            return self.build_windows(version, src_dir, output_dir, **kwargs)
         if sys.platform == 'darwin':
-            return self.build_macos(**kwargs)
+            return self.build_macos(version, src_dir, output_dir, **kwargs)
         if sys.platform == 'linux':
-            return self.build_linux(**kwargs)
+            return self.build_linux(version, src_dir, output_dir, **kwargs)
         raise Error('Unsupported build platform: %s', sys.platform)
 
     @staticmethod
@@ -537,7 +551,7 @@ class Build(Command):
         toolchain = Path(vcpkg).parent / 'scripts' / 'buildsystems' / 'vcpkg.cmake'
         if not toolchain.is_file():
             raise Error('Toolchain file not found in vcpkg installation directory.')
-        return toolchain
+        return toolchain.resolve()
 
     # noinspection PyMethodMayBeStatic
     def build_source_tarball(self, version, tag_name, src_dir, output_dir):
@@ -571,21 +585,35 @@ class Build(Command):
         _run([comp, '-6', '--force', str(output_file.absolute())], cwd=src_dir)
 
     # noinspection PyMethodMayBeStatic
-    def build_windows(self, version, src_dir, output_dir, snapshot, install_prefix, no_source_tarball,
-                      use_system_deps, cmake_opts):
+    def build_windows(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts):
         pass
 
     # noinspection PyMethodMayBeStatic
-    def build_macos(self, version, src_dir, output_dir, snapshot, install_prefix, use_system_deps,
-                    cmake_opts, macos_target, platform_target):
+    def build_macos(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts,
+                    macos_target, platform_target):
         if not use_system_deps:
-            cmake_opts.append(f'-DCMAKE_TOOLCHAIN_FILE={self._get_vcpkg_toolchain_file()}')
             cmake_opts.append(f'-DVCPKG_TARGET_TRIPLET={platform_target.replace("86_", "")}-osx-dynamic-release')
+        cmake_opts.append(f'-DCMAKE_OSX_DEPLOYMENT_TARGET={macos_target}')
         cmake_opts.append(f'-DCMAKE_OSX_ARCHITECTURES={platform_target}')
 
+        with tempfile.TemporaryDirectory() as build_dir:
+            logger.info('Configuring build...')
+            _run(['cmake', *cmake_opts, str(src_dir)], cwd=build_dir, capture_output=False)
+
+            logger.info('Compiling sources...')
+            _run(['cmake', '--build', '.', '--parallel', str(parallelism)], cwd=build_dir, capture_output=False)
+
+            logger.info('Packaging application...')
+            _run(['cpack', '-G', 'DragNDrop'], cwd=build_dir, capture_output=False)
+
+            output_file = Path(build_dir) / f'KeePassXC-{version}.dmg'
+            output_file.rename(output_dir / f'KeePassXC-{version}-{platform_target}.dmg')
+
+        logger.info('All done! Please don\'t forget to sign the binaries before distribution.')
+
     # noinspection PyMethodMayBeStatic
-    def build_linux(self, version, src_dir, output_dir, snapshot, install_prefix, use_system_deps,
-                    cmake_opts, docker_image, container_name):
+    def build_linux(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts,
+                    docker_image, container_name):
         pass
 
 
