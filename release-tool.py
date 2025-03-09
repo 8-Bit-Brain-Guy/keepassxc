@@ -30,7 +30,20 @@ import sys
 
 
 ###########################################################################################
-#                                       Globals
+#                                       Ctrl+F TOC
+###########################################################################################
+
+# class Check(Command)
+# class Merge(Command)
+# class Build(Command)
+# class GPGSign(Command)
+# class AppSign(Command)
+# class Notarize(Command)
+# class I18N(Command)
+
+
+###########################################################################################
+#                                         Globals
 ###########################################################################################
 
 
@@ -74,7 +87,7 @@ class SubprocessError(Error):
 
 
 def _term_colors_on():
-    return 'color' in os.getenv('TERM', '') or 'CLICOLOR_FORCE' in os.environ or sys.platform == 'win32'
+    return 'color' in os.getenv('TERM', '') or 'FORCE_COLOR' in os.environ or sys.platform == 'win32'
 
 
 _TERM_BOLD = '\x1b[1m' if _term_colors_on() else ''
@@ -90,15 +103,15 @@ _TERM_RES = '\x1b[0m' if _term_colors_on() else ''
 
 class LogFormatter(logging.Formatter):
     _FMT = {
-        logging.DEBUG: f'{_TERM_BOLD}[%(levelname)s{_TERM_RES}{_TERM_BOLD}]{_TERM_RES} %(message)s',
-        logging.INFO: f'{_TERM_BOLD}[{_TERM_BLUE}%(levelname)s{_TERM_RES}{_TERM_BOLD}]{_TERM_RES} %(message)s',
-        logging.WARNING: f'{_TERM_BOLD}[{_TERM_YELLOW}%(levelname)s{_TERM_RES}{_TERM_BOLD}]{_TERM_RES}{_TERM_YELLOW} %(message)s{_TERM_RES}',
-        logging.ERROR: f'{_TERM_BOLD}[{_TERM_RED}%(levelname)s{_TERM_RES}{_TERM_BOLD}]{_TERM_RES}{_TERM_RED} %(message)s{_TERM_RES}',
-        logging.CRITICAL: f'{_TERM_BOLD}[{_TERM_BRIGHT_RED}%(levelname)s{_TERM_RES}{_TERM_BOLD}]{_TERM_RES}{_TERM_BRIGHT_RED} %(message)s{_TERM_RES}',
+        logging.DEBUG: f'{_TERM_BOLD}[%(levelname)s]{_TERM_RES} %(message)s',
+        logging.INFO: f'{_TERM_BOLD}[{_TERM_BLUE}%(levelname)s{_TERM_RES_CLR}]{_TERM_RES} %(message)s',
+        logging.WARNING: f'{_TERM_BOLD}[{_TERM_YELLOW}%(levelname)s{_TERM_RES_CLR}]{_TERM_RES}{_TERM_YELLOW} %(message)s{_TERM_RES}',
+        logging.ERROR: f'{_TERM_BOLD}[{_TERM_RED}%(levelname)s{_TERM_RES_CLR}]{_TERM_RES}{_TERM_RED} %(message)s{_TERM_RES}',
+        logging.CRITICAL: f'{_TERM_BOLD}[{_TERM_BRIGHT_RED}%(levelname)s{_TERM_RES_CLR}]{_TERM_RES}{_TERM_BRIGHT_RED} %(message)s{_TERM_RES}',
     }
 
     def format(self, record):
-        return logging.Formatter(self._FMT.get(record.levelno)).format(record)
+        return logging.Formatter(self._FMT.get(record.levelno, '%(message)s')).format(record)
 
 
 console_handler = logging.StreamHandler()
