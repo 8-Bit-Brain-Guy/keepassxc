@@ -22,11 +22,13 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 ###########################################################################################
@@ -48,7 +50,6 @@ import sys
 
 
 RELEASE_NAME = None
-APP_NAME = 'KeePassXC'
 SRC_DIR = os.getcwd()
 GIT_SIGN_KEY = 'BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2'
 OUTPUT_DIR = 'release'
@@ -80,6 +81,9 @@ class Error(Exception):
         self.args = args
         self.kwargs = kwargs
         self.__dict__.update(kwargs)
+
+    def __str__(self):
+        return self.msg % self.args
 
 
 class SubprocessError(Error):
@@ -265,7 +269,7 @@ class Command:
 
 
 class Check(Command):
-    """Perform a dry-run check, nothing is changed."""
+    """Perform a pre-merge dry-run check, nothing is changed."""
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
@@ -296,18 +300,23 @@ class Check(Command):
         cls.check_git_repository(src_dir)
 
     @classmethod
-    def perform_version_checks(cls, version, src_dir, release_branch=None):
+    def perform_version_checks(cls, version, src_dir, git_ref=None, version_exists=False, checkout=True):
         logger.info('Performing version checks...')
         major, minor, patch = _split_version(version)
-        release_branch = release_branch or f'release/{major}.{minor}.x'
         cls.check_working_tree_clean(src_dir)
-        cls.check_release_does_not_exist(version, src_dir)
-        cls.check_branch_exists(release_branch, src_dir)
-        _git_checkout(release_branch, cwd=src_dir)
-        logger.info('Attempting to find "%s" version string in source files...', version)
-        cls.check_version_in_cmake(version, src_dir)
-        cls.check_changelog(version, src_dir)
-        cls.check_app_stream_info(version, src_dir)
+        if version_exists:
+            git_ref = git_ref or version
+            cls.check_release_exists(git_ref, src_dir)
+        else:
+            git_ref = git_ref or f'release/{major}.{minor}.x'
+            cls.check_release_does_not_exist(version, src_dir)
+            cls.check_branch_exists(git_ref, src_dir)
+        if checkout:
+            _git_checkout(git_ref, cwd=src_dir)
+            logger.info('Attempting to find "%s" version string in source files...', version)
+            cls.check_version_in_cmake(version, src_dir)
+            cls.check_changelog(version, src_dir)
+            cls.check_app_stream_info(version, src_dir)
 
     @staticmethod
     def check_src_dir_exists(src_dir):
@@ -327,8 +336,13 @@ class Check(Command):
             raise Error('Not a valid Git repository: %s', e.msg)
 
     @staticmethod
+    def check_release_exists(tag_name, cwd):
+        if not _run(['git', 'tag', '--list', tag_name], check=False, cwd=cwd).stdout:
+            raise Error('Release tag does not exists: %s', tag_name)
+
+    @staticmethod
     def check_release_does_not_exist(tag_name, cwd):
-        if _run(['git', 'tag', '-l', tag_name], check=False, cwd=cwd).stdout:
+        if _run(['git', 'tag', '--list', tag_name], check=False, cwd=cwd).stdout:
             raise Error('Release tag already exists: %s', tag_name)
 
     @staticmethod
@@ -341,7 +355,7 @@ class Check(Command):
     @staticmethod
     def check_branch_exists(branch, cwd):
         if _run(['git', 'rev-parse', branch], check=False, cwd=cwd).returncode != 0:
-            raise Error(f'Branch "{branch}" does not exist!')
+            raise Error(f'Branch or tag "{branch}" does not exist!')
 
     @staticmethod
     def check_version_in_cmake(version, cwd):
@@ -350,14 +364,13 @@ class Check(Command):
             cmakelists = Path(cwd) / cmakelists
         if not cmakelists.is_file():
             raise Error('File not found: %s', cmakelists)
-        major, minor, patch = _split_version(version)
         cmakelists_text = cmakelists.read_text()
-        if f'{APP_NAME.upper()}_VERSION_MAJOR "{major}"' not in cmakelists_text:
-            raise Error(f'{APP_NAME.upper()}_VERSION_MAJOR not updated to" {major}" in {cmakelists}.')
-        if f'{APP_NAME.upper()}_VERSION_MINOR "{minor}"' not in cmakelists_text:
-            raise Error(f'{APP_NAME.upper()}_VERSION_MINOR not updated to "{minor}" in {cmakelists}.')
-        if f'{APP_NAME.upper()}_VERSION_PATCH "{patch}"' not in cmakelists_text:
-            raise Error(f'{APP_NAME.upper()}_VERSION_PATCH not updated to "{patch}" in {cmakelists}.')
+        major = re.search(r'^set\(KEEPASSXC_VERSION_MAJOR "(\d+)"\)$', cmakelists_text, re.MULTILINE).group(1)
+        minor = re.search(r'^set\(KEEPASSXC_VERSION_MINOR "(\d+)"\)$', cmakelists_text, re.MULTILINE).group(1)
+        patch = re.search(r'^set\(KEEPASSXC_VERSION_PATCH "(\d+)"\)$', cmakelists_text, re.MULTILINE).group(1)
+        cmake_version = '.'.join([major, minor, patch])
+        if cmake_version != version:
+            raise Error(f'Version number in {cmakelists} not updated! Expected: %s, found: %s.', version, cmake_version)
 
     @staticmethod
     def check_changelog(version, cwd):
@@ -367,8 +380,7 @@ class Check(Command):
         if not changelog.is_file():
             raise Error('File not found: %s', changelog)
         major, minor, patch = _split_version(version)
-        if not re.search(rf'^## {major}\.{minor}\.{patch} \([0-9]{4}-[0-9]{2}-[0-9]{2}\)',
-                         changelog.read_text()):
+        if not re.search(rf'^## {major}\.{minor}\.{patch} \(.+?\)\n+', changelog.read_text(), re.MULTILINE):
             raise Error(f'{changelog} has not been updated to the "%s" release.', version)
 
     @staticmethod
@@ -379,8 +391,8 @@ class Check(Command):
         if not appstream.is_file():
             raise Error('File not found: %s', appstream)
         major, minor, patch = _split_version(version)
-        if not re.search(rf'^\s*<release version="{major}\.{minor}\.{patch}" date="[0-9]{4}-[0-9]{2}-[0-9]{2}">',
-                         appstream.read_text()):
+        if not re.search(rf'^\s*<release version="{major}\.{minor}\.{patch}" date=".+?">',
+                         appstream.read_text(), re.MULTILINE):
             raise Error(f'{appstream} has not been updated to the "%s" release.', version)
 
     @staticmethod
@@ -456,9 +468,124 @@ class Build(Command):
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
+        parser.add_argument('version', help='Release version number or name.')
+        parser.add_argument('-s', '--src-dir', help='Source directory.', default='.')
+        parser.add_argument('-t', '--tag-name', help='Name of the tag to check out (default: same as version).')
+        parser.add_argument('-o', '--output-dir', default='release',
+                            help='Build output directory (default: %(default)s.')
+        parser.add_argument('-g', '--cmake-generator', help='Override default CMake generator.')
+        parser.add_argument('-i', '--install-prefix', help='Build install prefix.')
+        parser.add_argument('-n', '--no-source-tarball', help='Don\'t create a source tarball.', action='store_true')
+        parser.add_argument('--snapshot', help='Build snapshot from current HEAD.', action='store_true')
+        parser.add_argument('--use-system-deps', help='Use system dependencies instead of vcpkg.', action='store_true')
+
+        if sys.platform == 'darwin':
+            parser.add_argument('--macos-target', default=MACOSX_DEPLOYMENT_TARGET, metavar='MACOSX_DEPLOYMENT_TARGET',
+                                help='macOS deployment target version (default: %(default)s).')
+            parser.add_argument('--platform-target', default=platform.uname().machine,
+                                help='Build target platform (default: %(default)s).')
+        elif sys.platform == 'linux':
+            parser.add_argument('-d', '--docker-image', help='Run build in Docker image.')
+            parser.add_argument('--container-name', default='keepassxc-build',
+                                help='Docker build container name (default: %(default)s.')
+
+        parser.add_argument('-c', '--cmake-opts', nargs=argparse.REMAINDER,
+                            help='Additional CMake options (no other arguments can be specified after this).')
+
+    def run(self, tag_name, no_source_tarball, cmake_generator, **kwargs):
+        version, src_dir, output_dir = kwargs['version'], kwargs['src_dir'], kwargs['output_dir']
+        Check.perform_basic_checks(src_dir)
+        Check.check_output_dir_does_not_exist(output_dir)
+        Path(output_dir).mkdir(parents=True)
+
+        tag_name = tag_name or version
+        cmake_opts = ['-DWITH_XC_ALL=ON']
+        if kwargs['snapshot']:
+            logger.info('Building a snapshot from HEAD.')
+            try:
+                Check.check_version_in_cmake(version, src_dir)
+            except Error as e:
+                logger.warning(e.msg, *e.args)
+                cmake_opts.append(f'-DOVERRIDE_VERSION={version}-snapshot')
+            cmake_opts.append('-DKEEPASSXC_BUILD_TYPE=Snapshot')
+            version += '-snapshot'
+            tag_name = 'HEAD'
+        else:
+            Check.perform_version_checks(version, src_dir, tag_name, version_exists=True, checkout=True)
+            cmake_opts.append('-DKEEPASSXC_BUILD_TYPE=Release')
+
+        if cmake_generator:
+            cmake_opts.append(f'-G"{cmake_generator}"')
+        kwargs['cmake_opts'] = cmake_opts + (kwargs['cmake_opts'] or [])
+
+        if not no_source_tarball:
+            self.build_source_tarball(version, tag_name, kwargs['src_dir'], kwargs['output_dir'])
+
+        if sys.platform == 'win32':
+            return self.build_windows(**kwargs)
+        if sys.platform == 'darwin':
+            return self.build_macos(**kwargs)
+        if sys.platform == 'linux':
+            return self.build_linux(**kwargs)
+        raise Error('Unsupported build platform: %s', sys.platform)
+
+    @staticmethod
+    def _get_vcpkg_toolchain_file(path=None):
+        vcpkg = shutil.which('vcpkg', path=path)
+        if not vcpkg:
+            raise Error('vcpkg not found in PATH.')
+        toolchain = Path(vcpkg).parent / 'scripts' / 'buildsystems' / 'vcpkg.cmake'
+        if not toolchain.is_file():
+            raise Error('Toolchain file not found in vcpkg installation directory.')
+        return toolchain
+
+    # noinspection PyMethodMayBeStatic
+    def build_source_tarball(self, version, tag_name, src_dir, output_dir):
+        if not shutil.which('tar'):
+            logger.warning('tar not installed, skipping source tarball creation.')
+            return
+
+        logger.info('Building source tarball...')
+        prefix = f'keepassxc-{version}'
+        output_file = Path(output_dir) / f'{prefix}-src.tar'
+        _run(['git', 'archive', '--format=tar', f'--prefix={prefix}/', f'--output={output_file.absolute()}', tag_name],
+             cwd=src_dir)
+
+        # Add .version and .gitrev files to tarball
+        with tempfile.TemporaryDirectory() as tmp:
+            tpref = Path(tmp) / prefix
+            tpref.mkdir()
+            fver = tpref / '.version'
+            fver.write_text(version)
+            frev = tpref / '.gitrev'
+            git_rev = _run(['git', 'rev-parse', '--short=7', tag_name], cwd=src_dir).stdout.decode().strip()
+            frev.write_text(git_rev)
+            _run(['tar', '--append', f'--file={output_file.absolute()}',
+                  str(frev.relative_to(tmp)), str(fver.relative_to(tmp))], cwd=tmp)
+
+        logger.info('Compressing source tarball...')
+        comp = shutil.which('xz')
+        if not comp:
+            logger.warning('xz not installed, falling back to bzip2.')
+            comp = 'bzip2'
+        _run([comp, '-6', '--force', str(output_file.absolute())], cwd=src_dir)
+
+    # noinspection PyMethodMayBeStatic
+    def build_windows(self, version, src_dir, output_dir, snapshot, install_prefix, no_source_tarball,
+                      use_system_deps, cmake_opts):
         pass
 
-    def run(self, **kwargs):
+    # noinspection PyMethodMayBeStatic
+    def build_macos(self, version, src_dir, output_dir, snapshot, install_prefix, use_system_deps,
+                    cmake_opts, macos_target, platform_target):
+        if not use_system_deps:
+            cmake_opts.append(f'-DCMAKE_TOOLCHAIN_FILE={self._get_vcpkg_toolchain_file()}')
+            cmake_opts.append(f'-DVCPKG_TARGET_TRIPLET={platform_target.replace("86_", "")}-osx-dynamic-release')
+        cmake_opts.append(f'-DCMAKE_OSX_ARCHITECTURES={platform_target}')
+
+    # noinspection PyMethodMayBeStatic
+    def build_linux(self, version, src_dir, output_dir, snapshot, install_prefix, use_system_deps,
+                    cmake_opts, docker_image, container_name):
         pass
 
 
@@ -618,11 +745,11 @@ class I18N(Command):
         logger.info('Updating translation source files from C++ sources...')
         _run(['lupdate', '-no-ui-lines', '-disable-heuristic', 'similartext', '-locations', 'none',
               '-extensions', 'c,cpp,h,js,mm,qrc,ui', '-no-obsolete', 'src',
-              '-ts', str(Path(f'share/translations/{APP_NAME.lower()}_en.ts')), *(lupdate_args or [])],
+              '-ts', str(Path(f'share/translations/keepassxc_en.ts')), *(lupdate_args or [])],
              cwd=src_dir, path=path, capture_output=False)
         logger.info('Translation source files updated.')
         if commit:
-            _git_commit_files([f'share/translations/{APP_NAME.lower()}_en.ts'],
+            _git_commit_files([f'share/translations/keepassxc_en.ts'],
                               'Update translation sources.', cwd=src_dir)
 
 
