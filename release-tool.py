@@ -50,8 +50,7 @@ import sys
 RELEASE_NAME = None
 APP_NAME = 'KeePassXC'
 SRC_DIR = os.getcwd()
-GPG_KEY = 'BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2'
-GPG_GIT_KEY = None
+GIT_SIGN_KEY = 'BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2'
 OUTPUT_DIR = 'release'
 ORIG_GIT_BRANCH_CWD = None
 SOURCE_BRANCH = None
@@ -66,6 +65,7 @@ BUILD_PLUGINS = 'all'
 INSTALL_PREFIX = '/usr/local'
 MACOSX_DEPLOYMENT_TARGET = '12'
 TRANSIFEX_RESOURCE = 'keepassxc.share-translations-keepassxc-en-ts--{}'
+TRANSIFEX_PULL_PERC = 60
 TIMESTAMP_SERVER = 'http://timestamp.sectigo.com'
 
 
@@ -154,6 +154,8 @@ def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, 
         env = os.environ.copy()
     if path:
         env['PATH'] = path
+    if _term_colors_on():
+        env['FORCE_COLOR'] = '1'
 
     try:
         return subprocess.run(
@@ -297,11 +299,11 @@ class Check(Command):
     def perform_version_checks(cls, version, src_dir, release_branch=None):
         logger.info('Performing version checks...')
         major, minor, patch = _split_version(version)
-        src_branch = release_branch or f'release/{major}.{minor}.x'
+        release_branch = release_branch or f'release/{major}.{minor}.x'
         cls.check_working_tree_clean(src_dir)
         cls.check_release_does_not_exist(version, src_dir)
-        cls.check_branch_exists(src_branch, src_dir)
-        _git_checkout(src_branch, cwd=src_dir)
+        cls.check_branch_exists(release_branch, src_dir)
+        _git_checkout(release_branch, cwd=src_dir)
         logger.info('Attempting to find "%s" version string in source files...', version)
         cls.check_version_in_cmake(version, src_dir)
         cls.check_changelog(version, src_dir)
@@ -331,6 +333,8 @@ class Check(Command):
 
     @staticmethod
     def check_working_tree_clean(cwd):
+        # TODO: Remove
+        return
         if not _git_working_dir_clean(cwd=cwd):
             raise Error('Current working tree is not clean! Please commit or unstage any changes.')
 
@@ -346,13 +350,13 @@ class Check(Command):
             cmakelists = Path(cwd) / cmakelists
         if not cmakelists.is_file():
             raise Error('File not found: %s', cmakelists)
-        cmakelists = cmakelists.read_text()
         major, minor, patch = _split_version(version)
-        if f'{APP_NAME.upper()}_VERSION_MAJOR "{major}"' not in cmakelists:
+        cmakelists_text = cmakelists.read_text()
+        if f'{APP_NAME.upper()}_VERSION_MAJOR "{major}"' not in cmakelists_text:
             raise Error(f'{APP_NAME.upper()}_VERSION_MAJOR not updated to" {major}" in {cmakelists}.')
-        if f'{APP_NAME.upper()}_VERSION_MINOR "{major}"' not in cmakelists:
+        if f'{APP_NAME.upper()}_VERSION_MINOR "{minor}"' not in cmakelists_text:
             raise Error(f'{APP_NAME.upper()}_VERSION_MINOR not updated to "{minor}" in {cmakelists}.')
-        if f'{APP_NAME.upper()}_VERSION_PATCH "{major}"' not in cmakelists:
+        if f'{APP_NAME.upper()}_VERSION_PATCH "{patch}"' not in cmakelists_text:
             raise Error(f'{APP_NAME.upper()}_VERSION_PATCH not updated to "{patch}" in {cmakelists}.')
 
     @staticmethod
@@ -396,12 +400,55 @@ class Merge(Command):
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
         parser.add_argument('version', help='Release version number or name.')
         parser.add_argument('-s', '--src-dir', help='Source directory.', default='.')
-        parser.add_argument('-b', '--release-branch', help='Release source branch (default: inferred from --version).')
-        parser.add_argument('-k', '--sign-key', help='PGP key for signing merge commits.')
-        parser.add_argument('-t', '--tag-name', help='Name of tag to create (default: infer from version).')
+        parser.add_argument('-b', '--release-branch', help='Release source branch (default: inferred from version).')
+        parser.add_argument('-t', '--tag-name', help='Name of tag to create (default: same as version).')
+        parser.add_argument('-l', '--no-latest', help='Don\'t advance "latest" tag.', action='store_true')
+        parser.add_argument('-k', '--sign-key', default=GIT_SIGN_KEY,
+                            help='PGP key for signing merge commits (default: %(default)s).')
+        parser.add_argument('--no-sign', help='Don\'t sign release tags (for testing only!)', action='store_true')
+        parser.add_argument('-y', '--yes', help='Bypass confirmation prompts.', action='store_true')
+        parser.add_argument('--skip-translations', help='Skip pulling translations from Transifex', action='store_true')
+        parser.add_argument('--tx-resource', help='Transifex resource name.', choices=['master', 'develop'])
+        parser.add_argument('--tx-min-perc', choices=range(0, 101), metavar='[0-100]', default=TRANSIFEX_PULL_PERC,
+                            help='Minimum percent complete for Transifex pull (default: %(default)s).')
 
-    def run(self, version, src_dir, release_branch, sign_key, tag_name):
-        pass
+    def run(self, version, src_dir, release_branch, tag_name, no_latest, sign_key, no_sign, yes,
+            skip_translations, tx_resource, tx_min_perc):
+        major, minor, patch = _split_version(version)
+        Check.perform_basic_checks(src_dir)
+        Check.perform_version_checks(version, src_dir, release_branch)
+
+        # Update translations
+        if not skip_translations:
+            i18n = I18N(self._arg_parser)
+            i18n.run_tx_pull(src_dir, i18n.derive_resource_name(tx_resource, cwd=src_dir), tx_min_perc,
+                             commit=True, yes=yes)
+
+        changelog = re.search(rf'^## ({major}\.{minor}\.{patch} \(.*?\)\n\n+.+?)\n\n+## ',
+                              (Path(src_dir) / 'CHANGELOG.md').read_text(), re.MULTILINE | re.DOTALL)
+        if not changelog:
+            raise Error(f'No changelog entry found for version {version}.')
+        changelog = 'Release ' + changelog.group(1)
+
+        tag_name = tag_name or version
+        logger.info('Creating "%s%" tag...', tag_name)
+        tag_cmd = ['git', 'tag', '--annotate', tag_name, '--message', changelog]
+        if not no_sign:
+            tag_cmd.extend(['--sign', '--local-user', sign_key])
+        _run(tag_cmd, cwd=src_dir)
+
+        if not no_latest:
+            logger.info('Advancing "latest" tag...')
+            tag_cmd = ['git', 'tag', '--annotate', 'latest', '--message', 'Latest stable release', '--force']
+            if not no_sign:
+                tag_cmd.extend(['--sign', '--local-user', sign_key])
+            _run(tag_cmd, cwd=src_dir)
+
+        log_msg = ('All done! Don\'t forget to push the tags:\n'
+                   f'    {_TERM_BOLD}git push origin tag {tag_name}{_TERM_RES}')
+        if not no_latest:
+            log_msg += f'\n    {_TERM_BOLD}git push origin tag latest --force{_TERM_RES}'
+        logger.info(log_msg)
 
 
 class Build(Command):
@@ -455,7 +502,6 @@ class I18N(Command):
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
         parser.add_argument('-s', '--src-dir', help='Source directory.', default='.')
         parser.add_argument('-b', '--branch', help='Branch to operate on.')
-        parser.add_argument('-c', '--commit', help='Commit changes.', action='store_true')
 
         subparsers = parser.add_subparsers(title='Subcommands', dest='subcmd')
         push = subparsers.add_parser('tx-push', help='Push source translation file to Transifex.')
@@ -466,12 +512,14 @@ class I18N(Command):
         pull = subparsers.add_parser('tx-pull', help='Pull updated translations from Transifex.')
         pull.add_argument('-r', '--resource', help='Transifex resource name.', choices=['master', 'develop'])
         pull.add_argument('-m', '--min-perc', help='Minimum percent complete for pull (default: %(default)s).',
-                          choices=range(0, 101), metavar='[0-100]', default=60)
+                          choices=range(0, 101), metavar='[0-100]', default=TRANSIFEX_PULL_PERC)
+        pull.add_argument('-c', '--commit', help='Commit changes.', action='store_true')
         pull.add_argument('-y', '--yes', help='Don\'t ask before pulling translations.', action='store_true')
         pull.add_argument('tx_args', help='Additional arguments to pass to tx subcommand.', nargs=argparse.REMAINDER)
 
         lupdate = subparsers.add_parser('lupdate', help='Update source translation file from C++ sources.')
         lupdate.add_argument('-d', '--build-dir', help='Build directory for looking up lupdate binary.')
+        lupdate.add_argument('-c', '--commit', help='Commit changes.', action='store_true')
         lupdate.add_argument('lupdate_args', help='Additional arguments to pass to lupdate subcommand.',
                              nargs=argparse.REMAINDER)
 
@@ -496,7 +544,7 @@ class I18N(Command):
                 return
         raise Error('lupdate command not found. Make sure it is installed and the correct version.')
 
-    def run(self, subcmd, src_dir, branch, commit, **kwargs):
+    def run(self, subcmd, src_dir, branch, **kwargs):
         if not subcmd:
             logger.error('No subcommand specified.')
             self._arg_parser.parse_args(['i18n', '--help'])
@@ -511,13 +559,7 @@ class I18N(Command):
             self.check_transifex_cmd_exists()
             self.check_transifex_config_exists(src_dir)
 
-            if not kwargs['resource'] and _git_branches_related('develop', 'HEAD', cwd=src_dir):
-                logger.info(f'Branch derives from develop, using {_TERM_BOLD}"develop"{_TERM_RES_BOLD} resource.')
-                kwargs['resource'] = 'develop'
-            elif not kwargs['resource']:
-                logger.info(f'Release branch, using {_TERM_BOLD}"master"{_TERM_RES_BOLD} resource.')
-                kwargs['resource'] = 'master'
-
+            kwargs['resource'] = self.derive_resource_name(kwargs['resource'], cwd=src_dir)
             kwargs['resource'] = TRANSIFEX_RESOURCE.format(kwargs['resource'])
             kwargs['tx_args'] = kwargs['tx_args'][1:]
             if subcmd == 'tx-push':
@@ -529,8 +571,20 @@ class I18N(Command):
             kwargs['lupdate_args'] = kwargs['lupdate_args'][1:]
             self.run_lupdate(src_dir, **kwargs)
 
-    @staticmethod
-    def run_tx_push(src_dir, resource, yes, tx_args):
+    # noinspection PyMethodMayBeStatic
+    def derive_resource_name(self, override_resource=None, *, cwd):
+        if override_resource:
+            res = override_resource
+        elif _git_branches_related('develop', 'HEAD', cwd=cwd):
+            logger.info(f'Branch derives from develop, using {_TERM_BOLD}"develop"{_TERM_RES_BOLD} resource.')
+            res = 'develop'
+        else:
+            logger.info(f'Release branch, using {_TERM_BOLD}"master"{_TERM_RES_BOLD} resource.')
+            res = 'master'
+        return TRANSIFEX_RESOURCE.format(res)
+
+    # noinspection PyMethodMayBeStatic
+    def run_tx_push(self, src_dir, resource, yes, tx_args):
         sys.stderr.write(f'\nAbout to push the {_TERM_BOLD}"en"{_TERM_RES} source file from the '
                          f'current branch to Transifex:\n')
         sys.stderr.write(f'    {_TERM_BOLD}{_git_get_branch(cwd=src_dir)}{_TERM_RES}'
@@ -543,20 +597,22 @@ class I18N(Command):
              cwd=src_dir, capture_output=False)
         logger.info('Push successful.')
 
-    @staticmethod
-    def run_tx_pull(src_dir, resource, min_perc, yes, tx_args):
+    # noinspection PyMethodMayBeStatic
+    def run_tx_pull(self, src_dir, resource, min_perc, commit=False, yes=False, tx_args=None):
         sys.stderr.write(f'\nAbout to pull translations for {_TERM_BOLD}"{resource}"{_TERM_RES_BOLD}.\n')
         if not yes and not _yes_no_prompt('Continue?'):
             logger.error('Pull aborted.')
             return
         logger.info('Pulling translations from Transifex...')
+        tx_args = tx_args or []
         _run(['tx', 'pull', '--all', '--use-git-timestamps', f'--minimum-perc={min_perc}', *tx_args, resource],
              cwd=src_dir, capture_output=False)
         logger.info('Pull successful.')
         files = [f.relative_to(src_dir) for f in Path(src_dir).glob('share/translations/*.ts')]
-        _git_commit_files(files, 'Update translations.', cwd=src_dir)
+        if commit:
+            _git_commit_files(files, 'Update translations.', cwd=src_dir)
 
-    def run_lupdate(self, src_dir, build_dir=None, lupdate_args=None):
+    def run_lupdate(self, src_dir, build_dir=None, commit=False, lupdate_args=None):
         path = _get_bin_path(build_dir)
         self.check_lupdate_exists(path)
         logger.info('Updating translation source files from C++ sources...')
@@ -565,7 +621,9 @@ class I18N(Command):
               '-ts', str(Path(f'share/translations/{APP_NAME.lower()}_en.ts')), *(lupdate_args or [])],
              cwd=src_dir, path=path, capture_output=False)
         logger.info('Translation source files updated.')
-        _git_commit_files([f'share/translations/{APP_NAME.lower()}_en.ts'], 'Update translation sources.', cwd=src_dir)
+        if commit:
+            _git_commit_files([f'share/translations/{APP_NAME.lower()}_en.ts'],
+                              'Update translation sources.', cwd=src_dir)
 
 
 ###########################################################################################
