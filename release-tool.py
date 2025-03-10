@@ -640,10 +640,10 @@ class Build(Command):
             urlretrieve(url, outfile)
             outfile.chmod(outfile.stat().st_mode | stat.S_IEXEC)
 
-    def build_linux(self, version, src_dir, output_dir, *, install_prefix, parallelism, cmake_opts,
+    def build_linux(self, version, src_dir, output_dir, *, install_prefix, parallelism, cmake_opts, use_system_deps,
                     platform_target, appimage, docker_image, **_):
-        if platform_target != platform.uname().machine and not docker_image:
-            raise Error('Need --docker-image for cross-platform compilation!')
+        if use_system_deps and platform_target != platform.uname().machine and not docker_image:
+            raise Error('Need --docker-image for cross-platform compilation when not building with vcpkg!')
 
         docker_args = dict(
             docker_image=docker_image,
