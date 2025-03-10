@@ -527,7 +527,9 @@ class Build(Command):
         cmake_opts = [
             '-DWITH_XC_ALL=ON',
             '-DCMAKE_BUILD_TYPE=Release',
-            '-DCMAKE_INSTALL_PREFIX=' + kwargs['install_prefix']
+            '-DCMAKE_INSTALL_PREFIX=' + kwargs['install_prefix'],
+            '-DWITH_TESTS=OFF',
+            '-DWITH_GUI_TESTS=OFF',
         ]
         if not kwargs['use_system_deps'] and not kwargs.get('docker_image'):
             cmake_opts.append(f'-DCMAKE_TOOLCHAIN_FILE={self._get_vcpkg_toolchain_file()}')
