@@ -26,9 +26,11 @@ import platform
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from urllib.request import urlretrieve
 
 
 ###########################################################################################
@@ -146,7 +148,8 @@ def _yes_no_prompt(prompt, default_no=True):
     return yes_no == 'n'
 
 
-def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, timeout=None, check=True, **kwargs):
+def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, timeout=None, check=True,
+         docker_image=None, docker_privileged=False, docker_mounts=None, **kwargs):
     """
     Run a command and return its output.
     Raises an error if ``check`` is ``True`` and the process exited with a non-zero code.
@@ -160,6 +163,19 @@ def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, 
         env['PATH'] = path
     if _term_colors_on():
         env['FORCE_COLOR'] = '1'
+
+    if docker_image:
+        docker_cmd = ['docker', 'run', '--rm', '--tty=true', '--entrypoint=/bin/bash', f'--workdir={cwd}']
+        docker_cmd.extend([f'--env={k}={v}' for k, v in env.items() if k in ['FORCE_COLOR', 'CC', 'CXX']])
+        if path:
+            docker_cmd.append(f'--env=PATH={path}')
+        docker_cmd.append(f'--volume={cwd.absolute()}:{cwd.absolute()}:rw')
+        if docker_mounts:
+            docker_cmd.extend([f'--volume={d.absolute()}:{d.absolute()}:rw' for d in docker_mounts])
+        if docker_privileged:
+            docker_cmd.extend(['--cap-add=SYS_ADMIN', '--security-opt=apparmor:unconfined', '--device=/dev/fuse'])
+        docker_cmd.append(docker_image)
+        cmd = docker_cmd + cmd
 
     try:
         return subprocess.run(
@@ -485,15 +501,13 @@ class Build(Command):
             parser.add_argument('-p', '--platform-target', default=platform.uname().machine,
                                 help='Build target platform (default: %(default)s).', choices=['x86_64', 'arm64'])
         elif sys.platform == 'linux':
-            parser.add_argument('-d', '--docker-image', help='Run build in Docker image.')
-            parser.add_argument('--container-name', default='keepassxc-build',
-                                help='Docker build container name (default: %(default)s.')
+            parser.add_argument('-d', '--docker-image', help='Run build in Docker image (overrides --use-system-deps).')
+            parser.add_argument('-a', '--appimage', help='Build an AppImage.', action='store_true')
 
         parser.add_argument('-c', '--cmake-opts', nargs=argparse.REMAINDER,
                             help='Additional CMake options (no other arguments can be specified after this).')
 
-    def run(self, version, src_dir, output_dir, tag_name, snapshot, no_source_tarball,
-            cmake_generator, install_prefix, yes, **kwargs):
+    def run(self, version, src_dir, output_dir, tag_name, snapshot, no_source_tarball, cmake_generator, yes, **kwargs):
         Check.perform_basic_checks(src_dir)
         src_dir = Path(src_dir).resolve()
         output_dir = Path(output_dir)
@@ -509,9 +523,9 @@ class Build(Command):
         cmake_opts = [
             '-DWITH_XC_ALL=ON',
             '-DCMAKE_BUILD_TYPE=Release',
-            '-DCMAKE_INSTALL_PREFIX=' + install_prefix
+            '-DCMAKE_INSTALL_PREFIX=' + kwargs['install_prefix']
         ]
-        if not kwargs['use_system_deps']:
+        if not kwargs['use_system_deps'] and not kwargs.get('docker_image'):
             cmake_opts.append(f'-DCMAKE_TOOLCHAIN_FILE={self._get_vcpkg_toolchain_file()}')
 
         if snapshot:
@@ -585,12 +599,12 @@ class Build(Command):
         _run([comp, '-6', '--force', str(output_file.absolute())], cwd=src_dir)
 
     # noinspection PyMethodMayBeStatic
-    def build_windows(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts):
+    def build_windows(self, version, src_dir, output_dir, *, parallelism, cmake_opts, **_):
         pass
 
     # noinspection PyMethodMayBeStatic
-    def build_macos(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts,
-                    macos_target, platform_target):
+    def build_macos(self, version, src_dir, output_dir, *,  use_system_deps, parallelism, cmake_opts,
+                    macos_target, platform_target, **_):
         if not use_system_deps:
             cmake_opts.append(f'-DVCPKG_TARGET_TRIPLET={platform_target.replace("86_", "")}-osx-dynamic-release')
         cmake_opts.append(f'-DCMAKE_OSX_DEPLOYMENT_TARGET={macos_target}')
@@ -601,7 +615,7 @@ class Build(Command):
             _run(['cmake', *cmake_opts, str(src_dir)], cwd=build_dir, capture_output=False)
 
             logger.info('Compiling sources...')
-            _run(['cmake', '--build', '.', '--parallel', str(parallelism)], cwd=build_dir, capture_output=False)
+            _run(['cmake', '--build', '.', f'--parallel={parallelism}'], cwd=build_dir, capture_output=False)
 
             logger.info('Packaging application...')
             _run(['cpack', '-G', 'DragNDrop'], cwd=build_dir, capture_output=False)
@@ -611,10 +625,78 @@ class Build(Command):
 
         logger.info('All done! Please don\'t forget to sign the binaries before distribution.')
 
+    @staticmethod
+    def _download_tools_if_not_available(toolname, bin_dir, url, docker_image=None):
+        if _run(['which', toolname], cwd=None, check=False, docker_image=docker_image).returncode != 0:
+            logger.info(f'Downloading {toolname}...')
+            outfile = bin_dir / toolname
+            urlretrieve(url, outfile)
+            outfile.chmod(outfile.stat().st_mode | stat.S_IEXEC)
+
     # noinspection PyMethodMayBeStatic
-    def build_linux(self, version, src_dir, output_dir, *, use_system_deps, parallelism, cmake_opts,
-                    docker_image, container_name):
-        pass
+    def build_linux(self, version, src_dir, output_dir, *, install_prefix, parallelism, cmake_opts,
+                    appimage, docker_image, **_):
+        if docker_image:
+            logger.info('Pulling Docker image...')
+            _run(['docker', 'pull', docker_image], cwd=None, capture_output=False)
+
+        with tempfile.TemporaryDirectory() as build_dir:
+            logger.info('Configuring build...')
+            _run(['cmake', *cmake_opts, str(src_dir)], cwd=build_dir, capture_output=False,
+                 docker_image=docker_image, docker_mounts=[src_dir])
+
+            logger.info('Compiling sources...')
+            _run(['cmake', '--build', '.', f'--parallel={parallelism}'], cwd=build_dir, capture_output=False,
+                 docker_image=docker_image, docker_mounts=[src_dir])
+
+            logger.info('Bundling AppDir...')
+            app_dir = Path(build_dir) / f'KeePassXC-{version}.AppDir'
+            _run(['cmake', '--install', f'--prefix={app_dir / install_prefix}', '--strip'],
+                 cwd=build_dir, capture_output=False, docker_image=docker_image, docker_mounts=[src_dir])
+            shutil.copytree(app_dir, output_dir / app_dir.name, symlinks=True)
+
+            if appimage:
+                self._build_linux_appimage(
+                    version, src_dir, output_dir, app_dir, build_dir, install_prefix, docker_image)
+
+    def _build_linux_appimage(self, version, src_dir, output_dir, app_dir, build_dir, install_prefix, docker_image):
+        if (app_dir / 'AppRun').exists():
+            raise Error('AppDir has already been run through linuxdeploy! Please create a fresh AppDir and try again.')
+
+        bin_dir = Path(build_dir) / 'bin'
+        bin_dir.mkdir()
+        self._download_tools_if_not_available(
+            'linuxdeploy', bin_dir,
+            'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage',
+            docker_image=docker_image)
+        self._download_tools_if_not_available(
+            'linuxdeploy-plugin-qt', bin_dir,
+            'https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/' +
+            'linuxdeploy-plugin-qt-x86_64.AppImage',
+            docker_image=docker_image)
+        self._download_tools_if_not_available(
+            'appimagetool', bin_dir,
+            'https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage',
+            docker_image=docker_image)
+        env_path = ':'.join([bin_dir, _get_bin_path()])
+        desktop_file = app_dir / install_prefix / 'share/applications/org.keepassxc.KeePassXC.desktop'
+        icon_file = app_dir / install_prefix / 'share/icons/hicolor/256x256/apps/keepassxc.png'
+        executables = list(map(str, (app_dir / install_prefix / 'bin').glob('keepassxc*')))
+        app_run = src_dir / 'share/linux/appimage-apprun.sh'
+
+        logger.info('Running linuxdeploy...')
+        _run(['linuxdeploy', '--plugin=qt', f'--appdir={app_dir}', f'--custom-apprun={app_run}',
+              f'--desktop-file={desktop_file}', f'--icon-file={icon_file}', *executables],
+             cwd=build_dir, capture_output=False, path=env_path,
+             docker_image=docker_image, docker_mounts=[src_dir])
+
+        logger.info('Building AppImage...')
+        appimage_name = f'KeePassXC-{version}-{platform.uname().machine}.AppImage'
+        desktop_file.write_text(desktop_file.read_text().strip() + f'\nX-AppImage-Version={version}\n')
+        _run(['appimagetool', '--updateinformation=gh-releases-zsync|keepassxreboot|keepassxc|latest|' +
+              f'KeePassXC-*-{platform.uname().machine}.AppImage.zsync', str(app_dir), str(output_dir / appimage_name)],
+             cwd=build_dir, capture_output=False, path=env_path,
+             docker_image=docker_image, docker_mounts=[src_dir], docker_privileged=True)
 
 
 class GPGSign(Command):
