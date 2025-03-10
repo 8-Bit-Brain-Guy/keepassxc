@@ -165,13 +165,13 @@ def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, 
         env['FORCE_COLOR'] = '1'
 
     if docker_image:
-        docker_cmd = ['docker', 'run', '--rm', '--tty=true', '--entrypoint=/bin/bash', f'--workdir={cwd}']
+        docker_cmd = ['docker', 'run', '--rm', '--tty=true', f'--workdir={cwd}', f'--user={os.getuid()}:{os.getgid()}']
         docker_cmd.extend([f'--env={k}={v}' for k, v in env.items() if k in ['FORCE_COLOR', 'CC', 'CXX']])
         if path:
             docker_cmd.append(f'--env=PATH={path}')
-        docker_cmd.append(f'--volume={cwd.absolute()}:{cwd.absolute()}:rw')
+        docker_cmd.append(f'--volume={Path(cwd).absolute()}:{Path(cwd).absolute()}:rw')
         if docker_mounts:
-            docker_cmd.extend([f'--volume={d.absolute()}:{d.absolute()}:rw' for d in docker_mounts])
+            docker_cmd.extend([f'--volume={Path(d).absolute()}:{Path(d).absolute()}:rw' for d in docker_mounts])
         if docker_privileged:
             docker_cmd.extend(['--cap-add=SYS_ADMIN', '--security-opt=apparmor:unconfined', '--device=/dev/fuse'])
         if docker_platform:
@@ -180,6 +180,7 @@ def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, 
         cmd = docker_cmd + cmd
 
     try:
+        logger.debug('Running command: %s', ' '.join(cmd))
         return subprocess.run(
             cmd, *args,
             input=input,
@@ -553,7 +554,7 @@ class Build(Command):
         kwargs['cmake_opts'] = cmake_opts + (kwargs['cmake_opts'] or [])
 
         if not no_source_tarball:
-            self.build_source_tarball(version, tag_name, kwargs['src_dir'], kwargs['output_dir'])
+            self.build_source_tarball(version, tag_name, src_dir, output_dir)
 
         if sys.platform == 'win32':
             return self.build_windows(version, src_dir, output_dir, **kwargs)
@@ -567,7 +568,7 @@ class Build(Command):
     def _get_vcpkg_toolchain_file(path=None):
         vcpkg = shutil.which('vcpkg', path=path)
         if not vcpkg:
-            raise Error('vcpkg not found in PATH.')
+            raise Error('vcpkg not found in PATH (use --use-system-deps to build with system dependencies instead).')
         toolchain = Path(vcpkg).parent / 'scripts' / 'buildsystems' / 'vcpkg.cmake'
         if not toolchain.is_file():
             raise Error('Toolchain file not found in vcpkg installation directory.')
@@ -621,7 +622,7 @@ class Build(Command):
             _run(['cmake', *cmake_opts, str(src_dir)], cwd=build_dir, capture_output=False)
 
             logger.info('Compiling sources...')
-            _run(['cmake', '--build', '.', f'--parallel={parallelism}'], cwd=build_dir, capture_output=False)
+            _run(['cmake', '--build', '.', f'--parallel', str(parallelism)], cwd=build_dir, capture_output=False)
 
             logger.info('Packaging application...')
             _run(['cpack', '-G', 'DragNDrop'], cwd=build_dir, capture_output=False)
@@ -642,7 +643,7 @@ class Build(Command):
     def build_linux(self, version, src_dir, output_dir, *, install_prefix, parallelism, cmake_opts,
                     platform_target, appimage, docker_image, **_):
         if platform_target != platform.uname().machine and not docker_image:
-            raise Error('Need --docker-image for platform cross-compilation!')
+            raise Error('Need --docker-image for cross-platform compilation!')
 
         docker_args = dict(
             docker_image=docker_image,
@@ -651,19 +652,24 @@ class Build(Command):
         )
         if docker_image:
             logger.info('Pulling Docker image...')
-            _run(['docker', 'pull', docker_image], cwd=None, capture_output=False)
+            _run(['docker', 'pull', f'--platform=linux/{platform_target}', docker_image],
+                 cwd=None, capture_output=False)
+
+        if appimage:
+            cmake_opts.append('-DKEEPASSXC_DIST_TYPE=AppImage')
 
         with tempfile.TemporaryDirectory() as build_dir:
             logger.info('Configuring build...')
             _run(['cmake', *cmake_opts, str(src_dir)], cwd=build_dir, capture_output=False, **docker_args)
 
             logger.info('Compiling sources...')
-            _run(['cmake', '--build', '.', f'--parallel={parallelism}'],
+            _run(['cmake', '--build', '.', '--parallel', str(parallelism)],
                  cwd=build_dir, capture_output=False, **docker_args)
 
             logger.info('Bundling AppDir...')
             app_dir = Path(build_dir) / f'KeePassXC-{version}-{platform_target}.AppDir'
-            _run(['cmake', '--install', f'--prefix={app_dir / install_prefix}', '--strip'],
+            _run(['cmake', '--install', '.', '--strip',
+                  '--prefix', (app_dir.absolute() / install_prefix.lstrip('/')).as_posix()],
                  cwd=build_dir, capture_output=False, **docker_args)
             shutil.copytree(app_dir, output_dir / app_dir.name, symlinks=True)
 
@@ -682,34 +688,37 @@ class Build(Command):
             'linuxdeploy', bin_dir,
             'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/' +
             f'linuxdeploy-{platform_target}.AppImage',
-            **docker_args)
+            docker_args)
         self._download_tools_if_not_available(
             'linuxdeploy-plugin-qt', bin_dir,
             'https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/' +
             f'linuxdeploy-plugin-qt-{platform_target}.AppImage',
-            **docker_args)
+            docker_args)
         self._download_tools_if_not_available(
             'appimagetool', bin_dir,
             'https://github.com/AppImage/AppImageKit/releases/download/continuous/' +
             f'appimagetool-{platform_target}.AppImage',
-            **docker_args)
+            docker_args)
 
-        env_path = ':'.join([bin_dir, _get_bin_path()])
-        desktop_file = app_dir / install_prefix / 'share/applications/org.keepassxc.KeePassXC.desktop'
-        icon_file = app_dir / install_prefix / 'share/icons/hicolor/256x256/apps/keepassxc.png'
-        executables = list(map(str, (app_dir / install_prefix / 'bin').glob('keepassxc*')))
+        env_path = ':'.join([bin_dir.as_posix(), _get_bin_path()])
+        install_prefix = app_dir / install_prefix.lstrip('/')
+        desktop_file = install_prefix / 'share/applications/org.keepassxc.KeePassXC.desktop'
+        icon_file = install_prefix / 'share/icons/hicolor/256x256/apps/keepassxc.png'
+        executables = (install_prefix / 'bin').glob('keepassxc*')
         app_run = src_dir / 'share/linux/appimage-apprun.sh'
 
         logger.info('Running linuxdeploy...')
         _run(['linuxdeploy', '--plugin=qt', f'--appdir={app_dir}', f'--custom-apprun={app_run}',
-              f'--desktop-file={desktop_file}', f'--icon-file={icon_file}', *executables],
+              f'--desktop-file={desktop_file}', f'--icon-file={icon_file}',
+              *[f'--executable={ex}' for ex in executables]],
              cwd=build_dir, capture_output=False, path=env_path, **docker_args)
 
         logger.info('Building AppImage...')
         appimage_name = f'KeePassXC-{version}-{platform_target}.AppImage'
         desktop_file.write_text(desktop_file.read_text().strip() + f'\nX-AppImage-Version={version}\n')
         _run(['appimagetool', '--updateinformation=gh-releases-zsync|keepassxreboot|keepassxc|latest|' +
-              f'KeePassXC-*-{platform_target}.AppImage.zsync', str(app_dir), str(output_dir / appimage_name)],
+              f'KeePassXC-*-{platform_target}.AppImage.zsync',
+              app_dir.as_posix(), (output_dir.absolute() / appimage_name).as_posix()],
              cwd=build_dir, capture_output=False, path=env_path, **docker_args, docker_privileged=True)
 
 
