@@ -248,7 +248,6 @@ def _cleanup():
     """Post-execution cleanup."""
     try:
         if _GIT_ORIG_BRANCH_CWD:
-            logger.info('Checking out original branch...')
             _git_checkout(_GIT_ORIG_BRANCH_CWD[0], cwd=_GIT_ORIG_BRANCH_CWD[1])
         return 0
     except Exception as e:
@@ -324,7 +323,7 @@ class Check(Command):
             cls.check_branch_exists(git_ref, src_dir)
         if checkout:
             _git_checkout(git_ref, cwd=src_dir)
-            logger.info('Attempting to find "%s" version string in source files...', version)
+            logger.debug('Attempting to find "%s" version string in source files...', version)
             cls.check_version_in_cmake(version, src_dir)
             cls.check_changelog(version, src_dir)
             cls.check_app_stream_info(version, src_dir)
