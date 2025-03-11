@@ -425,8 +425,7 @@ class Merge(Command):
         parser.add_argument('-b', '--release-branch', help='Release source branch (default: inferred from version).')
         parser.add_argument('-t', '--tag-name', help='Name of tag to create (default: same as version).')
         parser.add_argument('-l', '--no-latest', help='Don\'t advance "latest" tag.', action='store_true')
-        parser.add_argument('-k', '--sign-key', default='BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2',
-                            help='PGP key for signing merge commits (default: %(default)s).')
+        parser.add_argument('-k', '--sign-key', help='PGP key for signing release tags (default: ask).')
         parser.add_argument('--no-sign', help='Don\'t sign release tags (for testing only!)', action='store_true')
         parser.add_argument('-y', '--yes', help='Bypass confirmation prompts.', action='store_true')
         parser.add_argument('--skip-translations', help='Skip pulling translations from Transifex', action='store_true')
@@ -440,6 +439,8 @@ class Merge(Command):
         major, minor, patch = _split_version(version)
         Check.perform_basic_checks(src_dir)
         Check.perform_version_checks(version, src_dir, release_branch)
+        Check.check_gnupg()
+        sign_key = GPGSign.get_secret_key(sign_key)
 
         # Update translations
         if not skip_translations:
@@ -881,8 +882,8 @@ class GPGSign(Command):
         parser.add_argument('file', help='Input file(s) to sign', nargs='+')
         parser.add_argument('-k', '--gpg-key', help='GnuPG key for signing input files (default: ask).')
 
-    # noinspection PyMethodMayBeStatic
-    def _get_secret_key(self, user_choice):
+    @staticmethod
+    def get_secret_key(user_choice):
         keys = _run(['gpg', '--list-secret-keys', '--keyid-format=long'], cwd=None, text=True)
         keys = re.findall(r'^sec#?\s+(.+?/[A-F0-9]+) .+?\n\s+(.+?)\nuid .+?] (.+?)\n', keys.stdout, re.MULTILINE)
         if not keys:
