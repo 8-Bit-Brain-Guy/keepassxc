@@ -222,9 +222,8 @@ def _git_checkout(branch, *, cwd):
         global _GIT_ORIG_BRANCH_CWD
         if not _GIT_ORIG_BRANCH_CWD:
             _GIT_ORIG_BRANCH_CWD = (_git_get_branch(cwd=cwd), cwd)
-
         logger.info('Checking out branch "%s"...', branch)
-        # _run(['git', 'checkout', branch], cwd=cwd, text=True)
+        _run(['git', 'checkout', branch], cwd=cwd, text=True)
     except SubprocessError as e:
         raise Error('Failed to check out branch "%s". %s', branch, e)
 
@@ -250,7 +249,7 @@ def _cleanup():
     try:
         if _GIT_ORIG_BRANCH_CWD:
             logger.info('Checking out original branch...')
-            # _git_checkout(_ORIG_GIT_BRANCH_CWD[0], cwd=_ORIG_GIT_BRANCH_CWD[1])
+            _git_checkout(_GIT_ORIG_BRANCH_CWD[0], cwd=_GIT_ORIG_BRANCH_CWD[1])
         return 0
     except Exception as e:
         logger.critical('Exception occurred during cleanup:', exc_info=e)
@@ -357,8 +356,6 @@ class Check(Command):
 
     @staticmethod
     def check_working_tree_clean(cwd):
-        # TODO: Remove
-        return
         if not _git_working_dir_clean(cwd=cwd):
             raise Error('Current working tree is not clean! Please commit or unstage any changes.')
 
