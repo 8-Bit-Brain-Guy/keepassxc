@@ -1069,8 +1069,7 @@ def main():
         # Enable terminal colours
         ctypes.windll.kernel32.SetConsoleMode(ctypes.windll.kernel32.GetStdHandle(-11), 7)
 
-    sys.stderr.write(f'{_TERM_BOLD}{_TERM_GREEN}KeePassXC{_TERM_RES}'
-                     f'{_TERM_BOLD} Release Preparation Tool{_TERM_RES}\n')
+    sys.stderr.write(f'{_TERM_BOLD}{_TERM_GREEN}KeePassXC{_TERM_RES_CLR} Release Preparation Tool{_TERM_RES}\n')
     sys.stderr.write(f'Copyright (C) 2016-{datetime.now().year} KeePassXC Team <https://keepassxc.org/>\n\n')
 
     parser = argparse.ArgumentParser(add_help=True)
