@@ -409,8 +409,6 @@ class Check(Command):
             return
         if not _cmd_exists('xcrun'):
             raise Error('xcrun command not found! Please check that you have correctly installed Xcode.')
-        if not _cmd_exists('codesign'):
-            raise Error('codesign command not found! Please check that you have correctly installed Xcode.')
 
 
 class Merge(Command):
@@ -744,6 +742,7 @@ class AppSign(Command):
                 self.sign_windows(f, identity, Path(src_dir))
 
         elif sys.platform == 'darwin':
+            Check.check_xcode_setup()
             if kwargs['notarize']:
                 self._macos_validate_keychain_profile(kwargs['keychain_profile'])
             identity = self._macos_get_codesigning_identity(identity)
@@ -760,7 +759,7 @@ class AppSign(Command):
 
     # noinspection PyMethodMayBeStatic
     def _macos_validate_keychain_profile(self, keychain_profile):
-        if _run(['xcrun', 'security', 'find-generic-password', '-a',
+        if _run(['security', 'find-generic-password', '-a',
                  f'com.apple.gke.notary.tool.saved-creds.{keychain_profile}'], cwd=None, check=False).returncode != 0:
             raise Error(f'Keychain profile "%s" not found! Run\n'
                         f'    {_TERM_BOLD}xcrun notarytool store-credentials %s [...]{_TERM_RES_BOLD}\n'
@@ -769,10 +768,7 @@ class AppSign(Command):
 
     # noinspection PyMethodMayBeStatic
     def _macos_get_codesigning_identity(self, user_choice=None):
-        result = _run(['xcrun', 'security', 'find-identity', '-v', '-p', 'codesigning'],
-                      check=False, cwd=None, text=True)
-        if result.returncode != 0:
-            return []
+        result = _run(['security', 'find-identity', '-v', '-p', 'codesigning'], cwd=None, text=True)
         identities = [l.strip() for l in result.stdout.strip().split('\n')[:-1]]
         identities = [i.split(' ', 2)[1:] for i in identities]
         if not identities:
