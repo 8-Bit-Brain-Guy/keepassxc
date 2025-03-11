@@ -23,10 +23,12 @@ import logging
 import os
 from pathlib import Path
 import platform
+import random
 import re
 import signal
 import shutil
 import stat
+import string
 import subprocess
 import sys
 import tempfile
@@ -40,9 +42,8 @@ from urllib.request import urlretrieve
 # class Check(Command)
 # class Merge(Command)
 # class Build(Command)
-# class GPGSign(Command)
 # class AppSign(Command)
-# class Notarize(Command)
+# class GPGSign(Command)
 # class I18N(Command)
 
 
@@ -148,8 +149,21 @@ def _yes_no_prompt(prompt, default_no=True):
     return yes_no == 'n'
 
 
+def _choice_prompt(prompt, choices):
+    while True:
+        sys.stderr.write(prompt + '\n')
+        for i, c in enumerate(choices):
+            sys.stderr.write(f'  {i + 1}) {c}\n')
+        sys.stderr.write('\nYour choice: ')
+        choice = input().strip()
+        if not choice.isnumeric() or int(choice) < 1 or int(choice) > len(choices):
+            logger.error('Invalid choice: %s', choice)
+            continue
+        return int(choice) - 1
+
+
 def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, timeout=None, check=True,
-         docker_image=None, docker_privileged=False, docker_mounts=None, docker_platform=None, **kwargs):
+         docker_image=None, docker_privileged=False, docker_mounts=None, docker_platform=None, **run_kwargs):
     """
     Run a command and return its output.
     Raises an error if ``check`` is ``True`` and the process exited with a non-zero code.
@@ -189,13 +203,16 @@ def _run(cmd, *args, cwd, path=None, env=None, input=None, capture_output=True, 
             env=env,
             timeout=timeout,
             check=check,
-            **kwargs)
+            **run_kwargs)
     except FileNotFoundError:
         raise Error('Command not found: %s', cmd[0] if type(cmd) in [list, tuple] else cmd)
     except subprocess.CalledProcessError as e:
         if e.stderr:
+            err_txt = e.stderr
+            if type(err_txt) is bytes:
+                err_txt = err_txt.decode()
             raise SubprocessError('Command "%s" exited with non-zero code: %s',
-                                  cmd[0], e.stderr.decode(), **e.__dict__)
+                                  cmd[0], err_txt, **e.__dict__)
         else:
             raise SubprocessError('Command "%s" exited with non-zero code.', cmd[0], **e.__dict__)
 
@@ -212,7 +229,7 @@ def _git_working_dir_clean(*, cwd):
 
 def _git_get_branch(*, cwd):
     """Get current Git branch."""
-    return _run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=cwd).stdout.decode().strip()
+    return _run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=cwd, text=True).stdout.strip()
 
 
 def _git_branches_related(branch1, branch2, *, cwd):
@@ -226,12 +243,12 @@ def _git_checkout(branch, *, cwd):
     try:
         global ORIG_GIT_BRANCH_CWD
         if not ORIG_GIT_BRANCH_CWD:
-            ORIG_GIT_BRANCH_CWD = (_git_get_branch(cwd=cwd), cwd)
+            ORIG_GIT_BRANCH_CWD = (_git_get_branch(cwd=cwd, text=True), cwd)
 
         logger.info('Checking out branch "%s"...', branch)
-        # _run(['git', 'checkout', branch], cwd=cwd)
+        # _run(['git', 'checkout', branch], cwd=cwd, text=True)
     except SubprocessError as e:
-        raise Error('Failed to check out branch "%s". %s', branch, e.stderr.decode())
+        raise Error('Failed to check out branch "%s". %s', branch, e)
 
 
 def _git_commit_files(files, message, *, cwd, sign_key=None):
@@ -521,7 +538,7 @@ class Build(Command):
             if not yes and not _yes_no_prompt('Reuse existing output directory?'):
                 raise Error('Build aborted!')
         else:
-            logger.info('Creating output directory...')
+            logger.debug('Creating output directory...')
             output_dir.mkdir(parents=True)
 
         tag_name = tag_name or version
@@ -593,12 +610,12 @@ class Build(Command):
             fver = tpref / '.version'
             fver.write_text(version)
             frev = tpref / '.gitrev'
-            git_rev = _run(['git', 'rev-parse', '--short=7', tag_name], cwd=src_dir).stdout.decode().strip()
+            git_rev = _run(['git', 'rev-parse', '--short=7', tag_name], cwd=src_dir, text=True).stdout.strip()
             frev.write_text(git_rev)
             _run(['tar', '--append', f'--file={output_file.absolute()}',
                   str(frev.relative_to(tmp)), str(fver.relative_to(tmp))], cwd=tmp)
 
-        logger.info('Compressing source tarball...')
+        logger.debug('Compressing source tarball...')
         comp = shutil.which('xz')
         if not comp:
             logger.warning('xz not installed, falling back to bzip2.')
@@ -628,7 +645,7 @@ class Build(Command):
             _run(['cpack', '-G', 'DragNDrop'], cwd=build_dir, capture_output=False)
 
             output_file = Path(build_dir) / f'KeePassXC-{version}.dmg'
-            output_file.rename(output_dir / f'KeePassXC-{version}-{platform_target}.dmg')
+            output_file.rename(output_dir / f'KeePassXC-{version}-{platform_target}-unsigned.dmg')
 
         logger.info('All done! Please don\'t forget to sign the binaries before distribution.')
 
@@ -707,13 +724,14 @@ class Build(Command):
         executables = (install_prefix / 'bin').glob('keepassxc*')
         app_run = src_dir / 'share/linux/appimage-apprun.sh'
 
-        logger.info('Running linuxdeploy...')
+        logger.info('Building AppImage...')
+        logger.debug('Running linuxdeploy...')
         _run(['linuxdeploy', '--plugin=qt', f'--appdir={app_dir}', f'--custom-apprun={app_run}',
               f'--desktop-file={desktop_file}', f'--icon-file={icon_file}',
               *[f'--executable={ex}' for ex in executables]],
              cwd=build_dir, capture_output=False, path=env_path, **docker_args)
 
-        logger.info('Building AppImage...')
+        logger.debug('Running appimagetool...')
         appimage_name = f'KeePassXC-{version}-{platform_target}.AppImage'
         desktop_file.write_text(desktop_file.read_text().strip() + f'\nX-AppImage-Version={version}\n')
         _run(['appimagetool', '--updateinformation=gh-releases-zsync|keepassxreboot|keepassxc|latest|' +
@@ -722,30 +740,166 @@ class Build(Command):
              cwd=build_dir, capture_output=False, path=env_path, **docker_args, docker_privileged=True)
 
 
-class GPGSign(Command):
-    """Sign previously compiled release packages with GPG."""
-
-    @classmethod
-    def setup_arg_parser(cls, parser: argparse.ArgumentParser):
-        pass
-
-    def run(self, **kwargs):
-        pass
-
-
 class AppSign(Command):
     """Sign binaries with code signing certificates on Windows and macOS."""
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
+        parser.add_argument('file', help='Input file(s) to sign.', nargs='+')
+        parser.add_argument('-i', '--identity', help='Key or identity used for the signature (default: ask).')
+        parser.add_argument('-s', '--src-dir', help='Source directory (default: %(default)s).', default='.')
+
+        if sys.platform == 'darwin':
+            parser.add_argument('-n', '--notarize', help='Notarize signed file(s).', action='store_true')
+            parser.add_argument('-c', '--keychain-profile', default='notarization-creds',
+                                help='Read Apple credentials for notarization from a keychain (default: %(default)s).')
+
+    def run(self, file, identity, src_dir, **kwargs):
+        for i, f in enumerate(file):
+            f = Path(f)
+            if not f.exists():
+                raise Error('Input file does not exist: %s', f)
+            file[i] = f
+
+        if sys.platform == 'win32':
+            for f in file:
+                self.sign_windows(f, identity, Path(src_dir))
+
+        elif sys.platform == 'darwin':
+            if kwargs['notarize']:
+                self._macos_validate_keychain_profile(kwargs['keychain_profile'])
+            identity = self._macos_get_codesigning_identity(identity)
+            for f in file:
+                out_file = self.sign_macos(f, identity, Path(src_dir))
+                if kwargs['notarize'] and out_file.suffix == '.dmg':
+                    self.notarize_macos(out_file, kwargs['keychain_profile'])
+
+        else:
+            raise Error('Unsupported platform.')
+
+    def sign_windows(self, file, identity, src_dir):
         pass
 
-    def run(self, **kwargs):
-        pass
+    # noinspection PyMethodMayBeStatic
+    def _macos_validate_keychain_profile(self, keychain_profile):
+        if _run(['xcrun', 'security', 'find-generic-password', '-a',
+                 f'com.apple.gke.notary.tool.saved-creds.{keychain_profile}'], cwd=None, check=False).returncode != 0:
+            raise Error(f'Keychain profile "%s" not found! Run\n'
+                        f'    {_TERM_BOLD}xcrun notarytool store-credentials %s [...]{_TERM_RES_BOLD}\n'
+                        f'to store your Apple notary service credentials in a keychain as "%s".',
+                        keychain_profile, keychain_profile, keychain_profile)
+
+    # noinspection PyMethodMayBeStatic
+    def _macos_get_codesigning_identity(self, user_choice=None):
+        result = _run(['xcrun', 'security', 'find-identity', '-v', '-p', 'codesigning'],
+                      check=False, cwd=None, text=True)
+        if result.returncode != 0:
+            return []
+        identities = [l.strip() for l in result.stdout.strip().split('\n')[:-1]]
+        identities = [i.split(' ', 2)[1:] for i in identities]
+        if not identities:
+            raise Error('No codesigning identities found.')
+
+        if not user_choice and len(identities) == 1:
+            identity = identities[0][0]
+            logger.info('Using codesigning identity %s.', identities[0][1])
+        elif not user_choice:
+            c = _choice_prompt(
+                'The following code signing identities were found. Which one do you want to use?',
+                [' '.join(i) for i in identities])
+            identity = identities[c][0]
+        else:
+            for i in identities:
+                # Exact match of ID or substring match of description
+                if user_choice == i[0] or user_choice in i[1]:
+                    identity = i[0]
+                    break
+            else:
+                raise Error('Invalid identity: %s', user_choice)
+
+        return identity
+
+    # noinspection PyMethodMayBeStatic
+    def sign_macos(self, file, identity, src_dir):
+        logger.info('Signing file: "%s"', file)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).absolute()
+            app_dir = tmp / 'app'
+            out_file = file.parent / file.name.replace('-unsigned', '')
+
+            if file.is_file() and file.suffix == '.dmg':
+                logger.debug('Unpacking disk image...')
+                mnt = tmp / 'mnt'
+                mnt.mkdir()
+                try:
+                    _run(['hdiutil', 'attach', '-noautoopen', '-mountpoint', mnt.as_posix(), file.as_posix()], cwd=None)
+                    shutil.copytree(mnt, app_dir, symlinks=True)
+                finally:
+                    _run(['hdiutil', 'detach', mnt.as_posix()], cwd=None)
+            elif file.is_dir() and file.suffix == '.app':
+                logger.debug('Copying .app directory...')
+                shutil.copytree(file, app_dir, symlinks=True)
+            else:
+                logger.warning('Skipping non-app file "%s"', file)
+                return
+
+            app_dir_app = list(app_dir.glob('*.app'))[0]
+
+            logger.debug('Signing libraries and frameworks...')
+            _run(['xcrun', 'codesign', f'--sign={identity}', '--force', '--options=runtime', '--deep',
+                  app_dir_app.as_posix()], cwd=None)
+
+            # (Re-)Sign main executable with --entitlements
+            logger.debug('Signing main executable...')
+            _run(['xcrun', 'codesign', f'--sign={identity}', '--force', '--options=runtime',
+                  '--entitlements', (src_dir / 'share/macosx/keepassxc.entitlements').as_posix(),
+                  (app_dir_app / 'Contents/MacOS/KeePassXC').as_posix()], cwd=None)
+
+            tmp_out = out_file.with_suffix(f'.{"".join(random.choices(string.ascii_letters, k=8))}{file.suffix}')
+            try:
+                if file.suffix == '.dmg':
+                    logger.debug('Repackaging disk image...')
+                    dmg_size = sum(f.stat().st_size for f in app_dir.rglob('*'))
+                    _run(['hdiutil', 'create', '-volname', 'KeePassXC', '-srcfolder', app_dir.as_posix(),
+                          '-fs', 'HFS+', '-fsargs', '-c c=64,a=16,e=16', '-format', 'UDBZ',
+                          '-size', f'{dmg_size}k', tmp_out.as_posix()],
+                    cwd=None)
+                elif file.suffix == '.app':
+                    shutil.copytree(app_dir, tmp_out, symlinks=True)
+            except:
+                if tmp_out.is_file():
+                    tmp_out.unlink()
+                elif tmp_out.is_dir():
+                    shutil.rmtree(tmp_out, ignore_errors=True)
+                raise
+            finally:
+                # Replace original file if all went well
+                if tmp_out.exists():
+                    if tmp_out.is_dir():
+                        shutil.rmtree(file)
+                    else:
+                        file.unlink()
+                    tmp_out.rename(out_file)
+
+        logger.info('File signed successfully and written to: "%s".', out_file)
+        return out_file
+
+    # noinspection PyMethodMayBeStatic
+    def notarize_macos(self, file, keychain_profile):
+        logger.info('Submitting "%s" for notarization...', file)
+        _run(['xcrun', 'notarytool', 'submit', f'--keychain-profile={keychain_profile}', '--wait',
+              file.as_posix()], cwd=None, capture_output=False)
+
+        logger.debug('Stapling notarization ticket...')
+        _run(['xcrun', 'stapler', 'staple', file.as_posix()], cwd=None)
+        _run(['xcrun', 'stapler', 'validate', file.as_posix()], cwd=None)
+
+        logger.info('Notarization successful.')
 
 
-class Notarize(Command):
-    """Submit macOS application DMG for notarization."""
+class GPGSign(Command):
+    """Sign previously compiled release packages with GPG."""
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
@@ -799,8 +953,8 @@ class I18N(Command):
     @staticmethod
     def check_lupdate_exists(path):
         if _cmd_exists('lupdate', path=path):
-            result = _run(['lupdate', '-version'], path=path, check=False, cwd=None)
-            if result.returncode == 0 and result.stdout.decode().startswith('lupdate version 5.'):
+            result = _run(['lupdate', '-version'], path=path, check=False, cwd=None, text=True)
+            if result.returncode == 0 and result.stdout.startswith('lupdate version 5.'):
                 return
         raise Error('lupdate command not found. Make sure it is installed and the correct version.')
 
@@ -915,17 +1069,13 @@ def main():
     Build.setup_arg_parser(build_parser)
     build_parser.set_defaults(_cmd=Build)
 
-    gpgsign_parser = subparsers.add_parser('gpgsign', help=GPGSign.__doc__)
-    Merge.setup_arg_parser(gpgsign_parser)
-    gpgsign_parser.set_defaults(_cmd=GPGSign)
-
     appsign_parser = subparsers.add_parser('appsign', help=AppSign.__doc__)
     AppSign.setup_arg_parser(appsign_parser)
     appsign_parser.set_defaults(_cmd=AppSign)
 
-    notarize_parser = subparsers.add_parser('notarize', help=Notarize.__doc__)
-    Notarize.setup_arg_parser(notarize_parser)
-    notarize_parser.set_defaults(_cmd=Notarize)
+    gpgsign_parser = subparsers.add_parser('gpgsign', help=GPGSign.__doc__)
+    Merge.setup_arg_parser(gpgsign_parser)
+    gpgsign_parser.set_defaults(_cmd=GPGSign)
 
     i18n_parser = subparsers.add_parser('i18n', help=I18N.__doc__)
     I18N.setup_arg_parser(i18n_parser)
@@ -939,7 +1089,7 @@ def main():
 
 
 def _sig_handler(_, __):
-    logger.warning('Process interrupted.')
+    logger.error('Process interrupted.')
     sys.exit(3 | _cleanup())
 
 
@@ -954,7 +1104,7 @@ if __name__ == '__main__':
         logger.error(e.msg, *e.args, extra=e.kwargs)
         ret = e.kwargs.get('returncode', 1)
     except KeyboardInterrupt:
-        logger.warning('Process interrupted.')
+        logger.error('Process interrupted.')
         ret = 3
     except Exception as e:
         logger.critical('Unhandled exception:', exc_info=e)
