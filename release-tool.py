@@ -19,6 +19,7 @@
 import argparse
 import ctypes
 from datetime import datetime
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -305,6 +306,7 @@ class Check(Command):
     def perform_tool_checks(cls):
         logger.info('Checking for required build tools...')
         cls.check_xcode_setup()
+        cls.check_gnupg()
 
     @classmethod
     def perform_basic_checks(cls, src_dir):
@@ -409,6 +411,11 @@ class Check(Command):
             return
         if not _cmd_exists('xcrun'):
             raise Error('xcrun command not found! Please check that you have correctly installed Xcode.')
+
+    @staticmethod
+    def check_gnupg():
+        if not _cmd_exists('gpg'):
+            raise Error('GnuPG not installed.')
 
 
 class Merge(Command):
@@ -754,6 +761,8 @@ class AppSign(Command):
         else:
             raise Error('Unsupported platform.')
 
+        logger.info('All done.')
+
     def sign_windows(self, file, identity, src_dir):
         pass
 
@@ -775,27 +784,22 @@ class AppSign(Command):
             raise Error('No codesigning identities found.')
 
         if not user_choice and len(identities) == 1:
-            identity = identities[0][0]
             logger.info('Using codesigning identity %s.', identities[0][1])
+            return identities[0][0]
         elif not user_choice:
-            c = _choice_prompt(
+            return identities[_choice_prompt(
                 'The following code signing identities were found. Which one do you want to use?',
-                [' '.join(i) for i in identities])
-            identity = identities[c][0]
+                [' '.join(i) for i in identities])][0]
         else:
             for i in identities:
                 # Exact match of ID or substring match of description
                 if user_choice == i[0] or user_choice in i[1]:
-                    identity = i[0]
-                    break
-            else:
-                raise Error('Invalid identity: %s', user_choice)
-
-        return identity
+                    return i[0]
+            raise Error('Invalid identity: %s', user_choice)
 
     # noinspection PyMethodMayBeStatic
     def sign_macos(self, file, identity, src_dir):
-        logger.info('Signing file: "%s"', file)
+        logger.info('Signing "%s"', file)
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp).absolute()
@@ -877,10 +881,49 @@ class GPGSign(Command):
 
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
-        pass
+        parser.add_argument('file', help='Input file(s) to sign', nargs='+')
+        parser.add_argument('-k', '--gpg-key', help='GnuPG key for signing input files (default: ask).')
 
-    def run(self, **kwargs):
-        pass
+    # noinspection PyMethodMayBeStatic
+    def _get_secret_key(self, user_choice):
+        keys = _run(['gpg', '--list-secret-keys', '--keyid-format=long'], cwd=None, text=True)
+        keys = re.findall(r'^sec#?\s+(.+?/[A-F0-9]+) .+?\n\s+(.+?)\nuid .+?] (.+?)\n', keys.stdout, re.MULTILINE)
+        if not keys:
+            raise Error('No secret keys found!')
+
+        if not user_choice and len(keys) == 1:
+            logger.info('Using secret key %s %s.', keys[0][0]. keys[0][2])
+            return keys[0][1]
+        elif not user_choice:
+            return keys[_choice_prompt(
+                'The following secret keys were found. Which one do you want to use?',
+                [' '.join([k[0], k[2]]) for k in keys])][1]
+        else:
+            for i in keys:
+                if user_choice in i[1] or user_choice in i[2]:
+                    return i[1]
+            raise Error('Invalid key ID: %s', user_choice)
+
+    def run(self, file, gpg_key):
+        Check.check_gnupg()
+
+        for i, f in enumerate(file):
+            f = Path(f)
+            if not f.is_file():
+                raise Error('File "%s" does not exist or is not a file!', f)
+            file[i] = f
+
+        key_id = self._get_secret_key(gpg_key)
+        for f in file:
+            logger.info('Signing "%s"...', f)
+            _run(['gpg', '--armor', f'--local-user={key_id}', '--detach-sig',
+                  f'--output={f.with_suffix(f.suffix + ".sig")}', str(f)], cwd=None)
+
+            logger.info('Creating digest file...')
+            h = hashlib.sha256(f.read_bytes()).hexdigest()
+            f.with_suffix(f.suffix + '.DIGEST').write_text(f'{h}  {f.name}\n')
+
+        logger.info('All done.')
 
 
 class I18N(Command):
@@ -1051,7 +1094,7 @@ def main():
     appsign_parser.set_defaults(_cmd=AppSign)
 
     gpgsign_parser = subparsers.add_parser('gpgsign', help=GPGSign.__doc__)
-    Merge.setup_arg_parser(gpgsign_parser)
+    GPGSign.setup_arg_parser(gpgsign_parser)
     gpgsign_parser.set_defaults(_cmd=GPGSign)
 
     i18n_parser = subparsers.add_parser('i18n', help=I18N.__doc__)
