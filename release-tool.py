@@ -48,32 +48,6 @@ from urllib.request import urlretrieve
 
 
 ###########################################################################################
-#                                         Globals
-###########################################################################################
-
-
-RELEASE_NAME = None
-SRC_DIR = os.getcwd()
-GIT_SIGN_KEY = 'BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2'
-OUTPUT_DIR = 'release'
-ORIG_GIT_BRANCH_CWD = None
-SOURCE_BRANCH = None
-TAG_NAME = None
-DOCKER_IMAGE = None
-DOCKER_CONTAINER_NAME = 'keepassxc-build-container'
-CMAKE_OPTIONS = []
-CPACK_GENERATORS = 'ZIP'
-COMPILER = 'g++'
-MAKE_OPTIONS = f'-j{os.cpu_count()}'
-BUILD_PLUGINS = 'all'
-INSTALL_PREFIX = '/usr/local'
-MACOSX_DEPLOYMENT_TARGET = '12'
-TRANSIFEX_RESOURCE = 'keepassxc.share-translations-keepassxc-en-ts--{}'
-TRANSIFEX_PULL_PERC = 60
-TIMESTAMP_SERVER = 'http://timestamp.sectigo.com'
-
-
-###########################################################################################
 #                                   Errors and Logging
 ###########################################################################################
 
@@ -238,12 +212,15 @@ def _git_branches_related(branch1, branch2, *, cwd):
             _run(['git', 'merge-base', '--is-ancestor', branch2, branch1], cwd=cwd).returncode == 0)
 
 
+_GIT_ORIG_BRANCH_CWD = None
+
+
 def _git_checkout(branch, *, cwd):
     """Check out Git branch."""
     try:
-        global ORIG_GIT_BRANCH_CWD
-        if not ORIG_GIT_BRANCH_CWD:
-            ORIG_GIT_BRANCH_CWD = (_git_get_branch(cwd=cwd, text=True), cwd)
+        global _GIT_ORIG_BRANCH_CWD
+        if not _GIT_ORIG_BRANCH_CWD:
+            _GIT_ORIG_BRANCH_CWD = (_git_get_branch(cwd=cwd), cwd)
 
         logger.info('Checking out branch "%s"...', branch)
         # _run(['git', 'checkout', branch], cwd=cwd, text=True)
@@ -270,9 +247,9 @@ def _git_commit_files(files, message, *, cwd, sign_key=None):
 def _cleanup():
     """Post-execution cleanup."""
     try:
-        if ORIG_GIT_BRANCH_CWD:
+        if _GIT_ORIG_BRANCH_CWD:
             logger.info('Checking out original branch...')
-            # _git_checkout(ORIG_GIT_BRANCH_CWD[0], cwd=ORIG_GIT_BRANCH_CWD[1])
+            # _git_checkout(_ORIG_GIT_BRANCH_CWD[0], cwd=_ORIG_GIT_BRANCH_CWD[1])
         return 0
     except Exception as e:
         logger.critical('Exception occurred during cleanup:', exc_info=e)
@@ -446,13 +423,14 @@ class Merge(Command):
         parser.add_argument('-b', '--release-branch', help='Release source branch (default: inferred from version).')
         parser.add_argument('-t', '--tag-name', help='Name of tag to create (default: same as version).')
         parser.add_argument('-l', '--no-latest', help='Don\'t advance "latest" tag.', action='store_true')
-        parser.add_argument('-k', '--sign-key', default=GIT_SIGN_KEY,
+        parser.add_argument('-k', '--sign-key', default='BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2',
                             help='PGP key for signing merge commits (default: %(default)s).')
         parser.add_argument('--no-sign', help='Don\'t sign release tags (for testing only!)', action='store_true')
         parser.add_argument('-y', '--yes', help='Bypass confirmation prompts.', action='store_true')
         parser.add_argument('--skip-translations', help='Skip pulling translations from Transifex', action='store_true')
         parser.add_argument('--tx-resource', help='Transifex resource name.', choices=['master', 'develop'])
-        parser.add_argument('--tx-min-perc', choices=range(0, 101), metavar='[0-100]', default=TRANSIFEX_PULL_PERC,
+        parser.add_argument('--tx-min-perc', choices=range(0, 101), metavar='[0-100]',
+                            default=I18N.TRANSIFEX_PULL_PERC,
                             help='Minimum percent complete for Transifex pull (default: %(default)s).')
 
     def run(self, version, src_dir, release_branch, tag_name, no_latest, sign_key, no_sign, yes,
@@ -516,7 +494,7 @@ class Build(Command):
         parser.add_argument('-y', '--yes', help='Bypass confirmation prompts.', action='store_true')
 
         if sys.platform == 'darwin':
-            parser.add_argument('--macos-target', default=MACOSX_DEPLOYMENT_TARGET, metavar='MACOSX_DEPLOYMENT_TARGET',
+            parser.add_argument('--macos-target', default=12, metavar='MACOSX_DEPLOYMENT_TARGET',
                                 help='macOS deployment target version (default: %(default)s).')
             parser.add_argument('-p', '--platform-target', default=platform.uname().machine,
                                 help='Build target platform (default: %(default)s).', choices=['x86_64', 'arm64'])
@@ -912,6 +890,9 @@ class GPGSign(Command):
 class I18N(Command):
     """Update translation files and pull from or push to Transifex."""
 
+    TRANSIFEX_RESOURCE = 'keepassxc.share-translations-keepassxc-en-ts--{}'
+    TRANSIFEX_PULL_PERC = 60
+
     @classmethod
     def setup_arg_parser(cls, parser: argparse.ArgumentParser):
         parser.add_argument('-s', '--src-dir', help='Source directory.', default='.')
@@ -926,7 +907,7 @@ class I18N(Command):
         pull = subparsers.add_parser('tx-pull', help='Pull updated translations from Transifex.')
         pull.add_argument('-r', '--resource', help='Transifex resource name.', choices=['master', 'develop'])
         pull.add_argument('-m', '--min-perc', help='Minimum percent complete for pull (default: %(default)s).',
-                          choices=range(0, 101), metavar='[0-100]', default=TRANSIFEX_PULL_PERC)
+                          choices=range(0, 101), metavar='[0-100]', default=cls.TRANSIFEX_PULL_PERC)
         pull.add_argument('-c', '--commit', help='Commit changes.', action='store_true')
         pull.add_argument('-y', '--yes', help='Don\'t ask before pulling translations.', action='store_true')
         pull.add_argument('tx_args', help='Additional arguments to pass to tx subcommand.', nargs=argparse.REMAINDER)
@@ -974,7 +955,7 @@ class I18N(Command):
             self.check_transifex_config_exists(src_dir)
 
             kwargs['resource'] = self.derive_resource_name(kwargs['resource'], cwd=src_dir)
-            kwargs['resource'] = TRANSIFEX_RESOURCE.format(kwargs['resource'])
+            kwargs['resource'] = self.TRANSIFEX_RESOURCE.format(kwargs['resource'])
             kwargs['tx_args'] = kwargs['tx_args'][1:]
             if subcmd == 'tx-push':
                 self.run_tx_push(src_dir, **kwargs)
@@ -995,7 +976,7 @@ class I18N(Command):
         else:
             logger.info(f'Release branch, using {_TERM_BOLD}"master"{_TERM_RES_BOLD} resource.')
             res = 'master'
-        return TRANSIFEX_RESOURCE.format(res)
+        return self.TRANSIFEX_RESOURCE.format(res)
 
     # noinspection PyMethodMayBeStatic
     def run_tx_push(self, src_dir, resource, yes, tx_args):
