@@ -289,29 +289,26 @@ class Check(Command):
         parser.add_argument('-v', '--version', help='Release version number or name.')
         parser.add_argument('-s', '--src-dir', help='Source directory.', default='.')
         parser.add_argument('-b', '--release-branch', help='Release source branch (default: inferred from --version).')
-        parser.add_argument('-t', '--check-tools', help='Check for necessary build tools.', action='store_true')
 
-    def run(self, version, src_dir, release_branch, check_tools):
+    def run(self, version, src_dir, release_branch):
         if not version:
             logger.warning('No version specified, performing only basic checks.')
-        if check_tools:
-            self.perform_tool_checks()
         self.perform_basic_checks(src_dir)
         if version:
             self.perform_version_checks(version, src_dir, release_branch)
         logger.info('All checks passed.')
 
     @classmethod
-    def perform_tool_checks(cls):
-        logger.info('Checking for required build tools...')
-        cls.check_xcode_setup()
-        cls.check_gnupg()
-
-    @classmethod
     def perform_basic_checks(cls, src_dir):
         logger.info('Performing basic checks...')
         cls.check_src_dir_exists(src_dir)
+        cls.check_git()
         cls.check_git_repository(src_dir)
+
+        logger.info('Checking for required build tools...')
+        cls.check_git()
+        cls.check_gnupg()
+        cls.check_xcode_setup()
 
     @classmethod
     def perform_version_checks(cls, version, src_dir, git_ref=None, version_exists=False, checkout=True):
@@ -403,16 +400,21 @@ class Check(Command):
             raise Error(f'{appstream} has not been updated to the "%s" release.', version)
 
     @staticmethod
-    def check_xcode_setup():
-        if sys.platform != 'darwin':
-            return
-        if not _cmd_exists('xcrun'):
-            raise Error('xcrun command not found! Please check that you have correctly installed Xcode.')
+    def check_git():
+        if not _cmd_exists('git'):
+            raise Error('Git not installed.')
 
     @staticmethod
     def check_gnupg():
         if not _cmd_exists('gpg'):
             raise Error('GnuPG not installed.')
+
+    @staticmethod
+    def check_xcode_setup():
+        if sys.platform != 'darwin':
+            return
+        if not _cmd_exists('xcrun'):
+            raise Error('xcrun command not found! Please check that you have correctly installed Xcode.')
 
 
 class Merge(Command):
