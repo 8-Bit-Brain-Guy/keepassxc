@@ -26,6 +26,10 @@ apps:
       - raw-usb
       - password-manager-service
       - browser-native-messaging
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
 
   cli:
     command: usr/bin/keepassxc-cli
