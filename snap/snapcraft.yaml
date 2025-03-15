@@ -53,13 +53,6 @@ plugs:
       - $HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/org.keepassxc.keepassxc_browser.json
       - $HOME/.local/share/torbrowser/tbb/x86_64/tor-browser_en-US/Browser/TorBrowser/Data/Browser/.mozilla/native-messaging-hosts/org.keepassxc.keepassxc_browser.json
 
-# Improve desktop integration
-layout:
-  /usr/share/X11/locale:
-    bind: $SNAP/usr/share/X11/locale
-  /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/plugins:
-    bind: $SNAP/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/qt5/plugins
-
 slots:
   session-dbus-interface:
     interface: dbus
