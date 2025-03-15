@@ -97,6 +97,7 @@ private:
     QPointer<DatabaseWidget> m_dbWidget;
     QSharedPointer<Database> m_db;
     TemporaryFile m_dbFile;
+    QScopedPointer<TemporaryFile> m_configFile;
     QString m_dbFileName;
     QString m_dbFilePath;
 };

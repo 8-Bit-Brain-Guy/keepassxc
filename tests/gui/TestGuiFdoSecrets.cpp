@@ -136,7 +136,10 @@ TestGuiFdoSecrets::~TestGuiFdoSecrets() = default;
 void TestGuiFdoSecrets::initTestCase()
 {
     VERIFY(Crypto::init());
-    Config::createTempFileInstance();
+    // Create temporary config file
+    auto tmpFileName = QString("%1/%2_settings.XXXXXX").arg(QDir::tempPath(), QCoreApplication::applicationName());
+    m_configFile.reset(new TemporaryFile(tmpFileName, this));
+    Config::createConfigFromFile(m_configFile->fileName(), {});
     config()->set(Config::AutoSaveAfterEveryChange, false);
     config()->set(Config::AutoSaveOnExit, false);
     config()->set(Config::GUI_ShowTrayIcon, true);

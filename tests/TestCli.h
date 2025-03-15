@@ -92,6 +92,7 @@ private:
     QScopedPointer<TemporaryFile> m_keyFileProtectedNoPasswordDbFile;
     QScopedPointer<TemporaryFile> m_yubiKeyProtectedDbFile;
     QScopedPointer<TemporaryFile> m_nonAsciiDbFile;
+    QScopedPointer<TemporaryFile> m_configFile;
 
     QScopedPointer<QBuffer> m_stdout;
     QScopedPointer<QBuffer> m_stderr;

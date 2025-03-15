@@ -94,7 +94,12 @@ int main(int argc, char* argv[])
 void TestGui::initTestCase()
 {
     QVERIFY(Crypto::init());
-    Config::createTempFileInstance();
+
+    // Create temporary config file
+    auto tmpFileName = QString("%1/%2_settings.XXXXXX").arg(QDir::tempPath(), QCoreApplication::applicationName());
+    m_configFile.reset(new TemporaryFile(tmpFileName, this));
+    Config::createConfigFromFile(m_configFile->fileName(), {});
+
     QLocale::setDefault(QLocale::c());
     Application::bootstrap();
 

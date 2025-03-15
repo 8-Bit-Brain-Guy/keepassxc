@@ -53,6 +53,7 @@ private:
     QPointer<DatabaseWidget> m_dbWidget;
     QSharedPointer<Database> m_db;
     QScopedPointer<TemporaryFile> m_dbFile;
+    QScopedPointer<TemporaryFile> m_configFile;
 };
 
 #endif // KEEPASSXC_TESTGUIBROWSER_H

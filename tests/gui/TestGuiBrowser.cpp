@@ -58,7 +58,10 @@ int main(int argc, char* argv[])
 void TestGuiBrowser::initTestCase()
 {
     QVERIFY(Crypto::init());
-    Config::createTempFileInstance();
+    // Create temporary config file
+    auto tmpFileName = QString("%1/%2_settings.XXXXXX").arg(QDir::tempPath(), QCoreApplication::applicationName());
+    m_configFile.reset(new TemporaryFile(tmpFileName, this));
+    Config::createConfigFromFile(m_configFile->fileName(), {});
     // Disable autosave so we can test the modified file indicator
     config()->set(Config::AutoSaveAfterEveryChange, false);
     config()->set(Config::AutoSaveOnExit, false);

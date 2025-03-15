@@ -19,6 +19,7 @@
 #ifndef KEEPASSX_TESTAUTOTYPE_H
 #define KEEPASSX_TESTAUTOTYPE_H
 
+#include "util/TemporaryFile.h"
 #include <QObject>
 #include <QSharedPointer>
 
@@ -58,6 +59,7 @@ private:
     AutoType* m_autoType;
     QSharedPointer<Database> m_db;
     QList<QSharedPointer<Database>> m_dbList;
+    QScopedPointer<TemporaryFile> m_configFile;
     Group* m_group;
     Entry* m_entry1;
     Entry* m_entry2;

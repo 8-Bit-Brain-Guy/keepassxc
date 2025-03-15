@@ -157,6 +157,7 @@ private:
 
     QByteArray m_dbData;
     QScopedPointer<TemporaryFile> m_dbFile;
+    QScopedPointer<TemporaryFile> m_configFile;
 };
 
 #endif // KEEPASSXC_TESTGUIFDOSECRETS_H
