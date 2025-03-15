@@ -9,7 +9,7 @@ adopt-info: keepassxc
 grade: stable
 base: core24
 confinement: strict
-compression: zstd
+compression: lzo
 
 apps:
   keepassxc:
