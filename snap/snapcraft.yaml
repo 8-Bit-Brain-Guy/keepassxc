@@ -16,7 +16,7 @@ apps:
     # Use desktop-launch to improve integration
     command: desktop-launch usr/bin/keepassxc
     desktop: usr/share/applications/org.keepassxc.KeePassXC.desktop
-    extensions: [qt5-base]
+    extensions: [kde-neon]
     plugs:
       - home
       - unity7
@@ -33,12 +33,12 @@ apps:
 
   cli:
     command: usr/bin/keepassxc-cli
-    extensions: [qt5-base]
+    extensions: [kde-neon]
     plugs: [home, removable-media, raw-usb]
 
   proxy:
     command: usr/bin/keepassxc-proxy
-    extensions: [qt5-base]
+    extensions: [kde-neon]
 
 # Enable direct access to the native messaging host configuration files
 plugs:
