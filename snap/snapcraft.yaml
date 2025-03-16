@@ -1,11 +1,9 @@
 name: keepassxc
 summary: "KeePassXC: Secure, Community-Driven Password Management"
 description: |
-  KeePassXC is an advanced password manager that continues the legacy of KeePassX.
-  It offers secure storage for your passwords in an encrypted database, with a modern,
-  user-friendly experience that adapts to your desktop environment.
-
-adopt-info: keepassxc
+  KeePassXC is an advanced password manager that offers secure storage 
+  in an encrypted database, with a modern, user-friendly experience that 
+  adapts to your desktop environment.
 grade: stable
 base: core24
 confinement: strict
