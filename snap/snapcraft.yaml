@@ -4,6 +4,7 @@ description: |
   KeePassXC is an advanced password manager that offers secure storage 
   in an encrypted database, with a modern, user-friendly experience that 
   adapts to your desktop environment.
+adopt-info: keepassxc
 grade: stable
 base: core24
 confinement: strict
